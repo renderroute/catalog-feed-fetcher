@@ -1,8 +1,10 @@
 .venv/
 __pycache__/
 *.pyc
-.out/
-*.json
-!stores.example.yml
 .env
 .DS_Store
+
+# Local fetch output (do not commit large catalogs).
+# IMPORTANT: actions/upload-artifact respects gitignore, so CI must NOT upload
+# from an ignored path. Workflow writes/copies to staged-catalogs/ instead.
+.out/
