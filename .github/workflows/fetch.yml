@@ -47,18 +47,23 @@ jobs:
           if-no-files-found: error
 
       # Pushes ONLY to a private staging repo. Never call a production website from here.
+      # Note: GitHub forbids `secrets` inside `if:`; skip inside the script when unset.
       - name: Push JSON to private staging repo
-        if: ${{ secrets.STAGING_PUSH_TOKEN != '' && secrets.STAGING_REPO != '' }}
         env:
           STAGING_PUSH_TOKEN: ${{ secrets.STAGING_PUSH_TOKEN }}
           STAGING_REPO: ${{ secrets.STAGING_REPO }}
-          STAGING_BRANCH: ${{ secrets.STAGING_BRANCH || 'main' }}
+          STAGING_BRANCH: ${{ secrets.STAGING_BRANCH }}
         run: |
           set -euo pipefail
+          if [ -z "${STAGING_PUSH_TOKEN:-}" ] || [ -z "${STAGING_REPO:-}" ]; then
+            echo "Skipping staging push (STAGING_PUSH_TOKEN / STAGING_REPO not set)."
+            exit 0
+          fi
+          BRANCH="${STAGING_BRANCH:-main}"
           DAY=$(date -u +%Y-%m-%d)
           WORK=/tmp/staging-push
           rm -rf "$WORK"
-          git clone --depth 1 --branch "$STAGING_BRANCH" \
+          git clone --depth 1 --branch "$BRANCH" \
             "https://x-access-token:${STAGING_PUSH_TOKEN}@github.com/${STAGING_REPO}.git" "$WORK"
           mkdir -p "$WORK/catalog-bridge/incoming/${DAY}"
           mkdir -p "$WORK/catalog-bridge/incoming/latest"
@@ -72,5 +77,5 @@ jobs:
             echo "No catalog changes to commit"
           else
             git commit -m "catalog incoming ${DAY}"
-            git push origin "$STAGING_BRANCH"
+            git push origin "$BRANCH"
           fi
