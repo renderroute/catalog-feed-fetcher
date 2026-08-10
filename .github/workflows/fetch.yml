@@ -64,7 +64,6 @@ jobs:
           if-no-files-found: error
 
       # Pushes ONLY to a private staging repo. Never call a production website from here.
-      # Note: GitHub forbids `secrets` inside `if:`; skip inside the script when unset.
       - name: Push JSON to private staging repo
         env:
           STAGING_PUSH_TOKEN: ${{ secrets.STAGING_PUSH_TOKEN }}
@@ -99,14 +98,16 @@ jobs:
             exit 1
           fi
 
-          echo "Staging clone target: github.com/${REPO} (branch ${BRANCH})"
+          # Git HTTPS wants Basic auth (x-access-token:PAT), not Bearer.
+          BASIC="$(printf 'x-access-token:%s' "$STAGING_PUSH_TOKEN" | base64 | tr -d '\n')"
+          GIT_AUTH=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${BASIC}")
+
+          echo "Staging clone target: github.com/${REPO} (branch length=${#BRANCH})"
           DAY=$(date -u +%Y-%m-%d)
           WORK=/tmp/staging-push
           rm -rf "$WORK"
 
-          # Bearer header avoids breaking the URL if the token has special characters.
-          git -c "http.extraheader=AUTHORIZATION: bearer ${STAGING_PUSH_TOKEN}" \
-            clone --depth 1 --branch "$BRANCH" \
+          git "${GIT_AUTH[@]}" clone --depth 1 --branch "$BRANCH" \
             "https://github.com/${REPO}.git" "$WORK"
 
           mkdir -p "$WORK/catalog-bridge/incoming/${DAY}"
@@ -121,6 +122,5 @@ jobs:
             echo "No catalog changes to commit"
           else
             git commit -m "catalog incoming ${DAY}"
-            git -c "http.extraheader=AUTHORIZATION: bearer ${STAGING_PUSH_TOKEN}" \
-              push origin "HEAD:${BRANCH}"
+            git "${GIT_AUTH[@]}" push origin "HEAD:${BRANCH}"
           fi
