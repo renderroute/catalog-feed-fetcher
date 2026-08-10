@@ -1,0 +1,11 @@
+defaults:
+  delay_seconds: 2.0
+  shopify_graphql_version: "2024-07"
+  shopify_page_size: 100
+  woo_per_page: 50
+
+stores:
+  - key: example-shop
+    platform: shopify   # shopify | woocommerce
+    base_url: https://example.com
+    enabled: true

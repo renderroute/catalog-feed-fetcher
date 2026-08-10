@@ -1,0 +1,45 @@
+# Public catalog sources only. No production site references.
+# retailer_key should match the downstream private map / site retailer slug.
+
+defaults:
+  delay_seconds: 2.0
+  shopify_graphql_version: "2024-07"
+  shopify_page_size: 100
+  woo_per_page: 50
+
+stores:
+  - key: elitehubs
+    platform: shopify
+    base_url: https://elitehubs.com
+    enabled: true
+
+  - key: bitkart
+    platform: shopify
+    base_url: https://bitkart.com
+    enabled: true
+
+  - key: getrightpc
+    platform: shopify
+    base_url: https://getrightpc.com
+    enabled: true
+
+  - key: hardwarenest
+    platform: shopify
+    base_url: https://hardwarenest.in
+    enabled: true
+
+  - key: mehtabrothers
+    platform: shopify
+    base_url: https://mehtabrothers.in
+    enabled: true
+
+  - key: tpstech
+    platform: shopify
+    base_url: https://tpstech.in
+    enabled: true
+
+  # Woo examples (enable when ready)
+  # - key: gamesncomps
+  #   platform: woocommerce
+  #   base_url: https://gamesncomps.com
+  #   enabled: false
