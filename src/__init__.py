@@ -1,4 +1,4 @@
-"""Lean public-catalog JSON schema aligned with merchant-feeds import items."""
+"""Lean public-catalog JSON schema (generic storefront catalog envelope)."""
 
 from __future__ import annotations
 

@@ -1,8 +1,8 @@
 name: Fetch public catalogs
 
 # BACKUP / manual research only.
-# Production cutover uses private pickpcparts-scraper → "Catalog fetch and ingest"
-# (WP list of fetch_via=github|shadow). Do not leave this schedule enabled for prod.
+# Production catalog jobs live in a separate private runner repo.
+# Do not leave a daily schedule enabled here for production cutover.
 
 on:
   # schedule disabled — was fetching ALL stores.yml retailers, not fetch_via=github only
@@ -96,7 +96,7 @@ jobs:
           fi
 
           if ! printf '%s' "$REPO" | grep -Eq '^[^/[:space:]]+/[^/[:space:]]+$'; then
-            echo "STAGING_REPO must be owner/name (e.g. myuser/pickpcparts-scraper)."
+            echo "STAGING_REPO must be owner/name (e.g. myuser/my-private-staging)."
             exit 1
           fi
 

@@ -8,7 +8,7 @@ import requests
 
 from . import USER_AGENT, money
 
-# Keep payload lean — same idea as merchant-feeds WOOCOMMERCE_STORE_API_FIELDS.
+# Keep payload lean — omit bulky HTML fields from Store API responses.
 FIELDS = (
     "id,name,permalink,sku,prices,images,categories,brands,"
     "is_in_stock,on_sale,gtin,global_unique_id"
