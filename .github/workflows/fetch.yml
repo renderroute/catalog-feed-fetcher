@@ -63,7 +63,7 @@ jobs:
           path: staged-catalogs/
           if-no-files-found: error
 
-      # Pushes ONLY to a private staging repo. Never call a production website from here.
+      # Pushes ONLY to private branch catalog-incoming (not main) so Desktop pulls stay small.
       - name: Push JSON to private staging repo
         env:
           STAGING_PUSH_TOKEN: ${{ secrets.STAGING_PUSH_TOKEN }}
@@ -76,7 +76,6 @@ jobs:
             exit 0
           fi
 
-          # Accept owner/name OR https://github.com/owner/name(.git)
           REPO="$(printf '%s' "$STAGING_REPO" | tr -d '\r\n')"
           REPO="${REPO#"${REPO%%[![:space:]]*}"}"
           REPO="${REPO%"${REPO##*[![:space:]]}"}"
@@ -89,38 +88,42 @@ jobs:
           BRANCH="${BRANCH#"${BRANCH%%[![:space:]]*}"}"
           BRANCH="${BRANCH%"${BRANCH##*[![:space:]]}"}"
           if [ -z "$BRANCH" ]; then
-            BRANCH=main
+            BRANCH=catalog-incoming
           fi
 
           if ! printf '%s' "$REPO" | grep -Eq '^[^/[:space:]]+/[^/[:space:]]+$'; then
             echo "STAGING_REPO must be owner/name (e.g. myuser/pickpcparts-scraper)."
-            echo "A full https://github.com/owner/name URL is also OK."
             exit 1
           fi
 
-          # Git HTTPS wants Basic auth (x-access-token:PAT), not Bearer.
           BASIC="$(printf 'x-access-token:%s' "$STAGING_PUSH_TOKEN" | base64 | tr -d '\n')"
           GIT_AUTH=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${BASIC}")
 
-          echo "Staging clone target: github.com/${REPO} (branch length=${#BRANCH})"
+          echo "Staging push: github.com/${REPO} branch=${BRANCH}"
           DAY=$(date -u +%Y-%m-%d)
           WORK=/tmp/staging-push
           rm -rf "$WORK"
 
-          git "${GIT_AUTH[@]}" clone --depth 1 --branch "$BRANCH" \
-            "https://github.com/${REPO}.git" "$WORK"
-
-          mkdir -p "$WORK/catalog-bridge/incoming/${DAY}"
-          mkdir -p "$WORK/catalog-bridge/incoming/latest"
-          cp -f .out/*.json "$WORK/catalog-bridge/incoming/${DAY}/"
-          cp -f .out/*.json "$WORK/catalog-bridge/incoming/latest/"
+          git "${GIT_AUTH[@]}" clone --depth 1 "https://github.com/${REPO}.git" "$WORK"
           cd "$WORK"
           git config user.name "catalog-bot"
           git config user.email "catalog-bot@users.noreply.github.com"
-          git add catalog-bridge/incoming
+
+          if git "${GIT_AUTH[@]}" ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+            git "${GIT_AUTH[@]}" fetch --depth 1 origin "$BRANCH"
+            git checkout -B "$BRANCH" FETCH_HEAD
+          else
+            git checkout -B "$BRANCH"
+          fi
+
+          mkdir -p "catalog-bridge/incoming/${DAY}"
+          mkdir -p "catalog-bridge/incoming/latest"
+          cp -f "$GITHUB_WORKSPACE"/.out/*.json "catalog-bridge/incoming/${DAY}/"
+          cp -f "$GITHUB_WORKSPACE"/.out/*.json "catalog-bridge/incoming/latest/"
+          git add -f catalog-bridge/incoming
           if git diff --cached --quiet; then
             echo "No catalog changes to commit"
           else
             git commit -m "catalog incoming ${DAY}"
-            git "${GIT_AUTH[@]}" push origin "HEAD:${BRANCH}"
+            git "${GIT_AUTH[@]}" push -u origin "HEAD:${BRANCH}"
           fi
