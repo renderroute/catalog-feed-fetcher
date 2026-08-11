@@ -1,13 +1,17 @@
 name: Fetch public catalogs
 
+# BACKUP / manual research only.
+# Production cutover uses private pickpcparts-scraper → "Catalog fetch and ingest"
+# (WP list of fetch_via=github|shadow). Do not leave this schedule enabled for prod.
+
 on:
-  schedule:
-    # 04:00 IST (UTC+5:30) — offset from typical private nightly jobs around 02:00 IST
-    - cron: '0 22 * * *'
+  # schedule disabled — was fetching ALL stores.yml retailers, not fetch_via=github only
+  # schedule:
+  #   - cron: '0 22 * * *'
   workflow_dispatch:
     inputs:
       store:
-        description: 'Optional single retailer key (empty = all enabled)'
+        description: 'Optional single retailer key (empty = all enabled in stores.yml)'
         required: false
         default: ''
 
