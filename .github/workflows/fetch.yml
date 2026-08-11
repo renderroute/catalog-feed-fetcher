@@ -1,19 +1,26 @@
 name: Fetch public catalogs
 
-# BACKUP / manual research only.
-# Production catalog jobs live in a separate private runner repo.
-# Do not leave a daily schedule enabled here for production cutover.
+# Production fetch runner (unlimited public Actions minutes).
+# Store list is NOT hardcoded for nightly runs — a private orchestrator (or WP Run Import)
+# passes retailer key + base_url + platform. This repo must stay anonymous: no site tokens.
 
 on:
-  # schedule disabled — was fetching ALL stores.yml retailers, not fetch_via=github only
-  # schedule:
-  #   - cron: '0 22 * * *'
   workflow_dispatch:
     inputs:
       store:
-        description: 'Optional single retailer key (empty = all enabled in stores.yml)'
+        description: 'Retailer key (required with base_url + platform for production)'
         required: false
         default: ''
+      base_url:
+        description: 'Store origin URL (e.g. https://example.com). Empty = legacy stores.yml lookup by key.'
+        required: false
+        default: ''
+      platform:
+        description: 'shopify | shopify_products_json | woocommerce'
+        required: false
+        default: ''
+  repository_dispatch:
+    types: [fetch-catalogs]
 
 jobs:
   fetch:
@@ -35,15 +42,68 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Prepare dynamic store list
+        id: prep
+        run: |
+          set -euo pipefail
+          mkdir -p .out /tmp/catalog-fetch
+
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+          stores = (event.get("client_payload") or {}).get("stores")
+          if not isinstance(stores, list) or not stores:
+              raise SystemExit("client_payload.stores must be a non-empty list")
+          path = Path("/tmp/catalog-fetch/stores.json")
+          path.write_text(json.dumps(stores), encoding="utf-8")
+          print(f"dynamic stores: {len(stores)}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("mode=repository_dispatch\n")
+              fh.write(f"stores_json={path}\n")
+              fh.write("store=\n")
+              fh.write("base_url=\n")
+              fh.write("platform=\n")
+          PY
+            exit 0
+          fi
+
+          STORE="${{ github.event.inputs.store }}"
+          BASE="${{ github.event.inputs.base_url }}"
+          PLATFORM="${{ github.event.inputs.platform }}"
+          echo "store=${STORE}" >> "$GITHUB_OUTPUT"
+          echo "base_url=${BASE}" >> "$GITHUB_OUTPUT"
+          echo "platform=${PLATFORM}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$BASE" ] && [ -n "$PLATFORM" ] && [ -n "$STORE" ]; then
+            echo "mode=inline" >> "$GITHUB_OUTPUT"
+            echo "stores_json=" >> "$GITHUB_OUTPUT"
+          elif [ -n "$STORE" ]; then
+            echo "mode=stores_yml" >> "$GITHUB_OUTPUT"
+            echo "stores_json=" >> "$GITHUB_OUTPUT"
+          else
+            echo "Provide store+base_url+platform (production), or store only (legacy stores.yml)."
+            exit 1
+          fi
+
       - name: Fetch catalogs
         run: |
           set -euo pipefail
-          EXTRA=""
-          if [ -n "${{ github.event.inputs.store }}" ]; then
-            EXTRA="--store ${{ github.event.inputs.store }}"
-          fi
+          MODE="${{ steps.prep.outputs.mode }}"
           mkdir -p .out
-          python -m src.fetch_all --out-dir .out $EXTRA
+          if [ "$MODE" = "repository_dispatch" ]; then
+            python -m src.fetch_all --out-dir .out --stores-json "${{ steps.prep.outputs.stores_json }}"
+          elif [ "$MODE" = "inline" ]; then
+            python -m src.fetch_all --out-dir .out \
+              --inline-store "${{ steps.prep.outputs.store }}" \
+              --base-url "${{ steps.prep.outputs.base_url }}" \
+              --platform "${{ steps.prep.outputs.platform }}"
+          else
+            python -m src.fetch_all --out-dir .out --store "${{ steps.prep.outputs.store }}"
+          fi
           echo "Output directory:"
           ls -la .out
           test -n "$(ls -A .out/*.json 2>/dev/null)" || {
@@ -69,6 +129,7 @@ jobs:
 
       # Pushes ONLY to private branch catalog-incoming (not main) so Desktop pulls stay small.
       - name: Push JSON to private staging repo
+        id: staging
         env:
           STAGING_PUSH_TOKEN: ${{ secrets.STAGING_PUSH_TOKEN }}
           STAGING_REPO: ${{ secrets.STAGING_REPO }}
@@ -77,6 +138,7 @@ jobs:
           set -euo pipefail
           if [ -z "${STAGING_PUSH_TOKEN:-}" ] || [ -z "${STAGING_REPO:-}" ]; then
             echo "Skipping staging push (STAGING_PUSH_TOKEN / STAGING_REPO not set)."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -106,28 +168,102 @@ jobs:
           echo "Staging push: github.com/${REPO} branch=${BRANCH}"
           DAY=$(date -u +%Y-%m-%d)
           WORK=/tmp/staging-push
-          rm -rf "$WORK"
 
-          git "${GIT_AUTH[@]}" clone --depth 1 "https://github.com/${REPO}.git" "$WORK"
-          cd "$WORK"
-          git config user.name "catalog-bot"
-          git config user.email "catalog-bot@users.noreply.github.com"
+          for attempt in 1 2 3 4 5 6; do
+            rm -rf "$WORK"
+            git "${GIT_AUTH[@]}" clone --depth 1 "https://github.com/${REPO}.git" "$WORK"
+            cd "$WORK"
+            git config user.name "catalog-bot"
+            git config user.email "catalog-bot@users.noreply.github.com"
 
-          if git "${GIT_AUTH[@]}" ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
-            git "${GIT_AUTH[@]}" fetch --depth 1 origin "$BRANCH"
-            git checkout -B "$BRANCH" FETCH_HEAD
-          else
-            git checkout -B "$BRANCH"
-          fi
+            if git "${GIT_AUTH[@]}" ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+              git "${GIT_AUTH[@]}" fetch --depth 1 origin "$BRANCH"
+              git checkout -B "$BRANCH" FETCH_HEAD
+            else
+              git checkout -B "$BRANCH"
+            fi
 
-          mkdir -p "catalog-bridge/incoming/${DAY}"
-          mkdir -p "catalog-bridge/incoming/latest"
-          cp -f "$GITHUB_WORKSPACE"/.out/*.json "catalog-bridge/incoming/${DAY}/"
-          cp -f "$GITHUB_WORKSPACE"/.out/*.json "catalog-bridge/incoming/latest/"
-          git add -f catalog-bridge/incoming
-          if git diff --cached --quiet; then
-            echo "No catalog changes to commit"
-          else
+            mkdir -p "catalog-bridge/incoming/${DAY}"
+            mkdir -p "catalog-bridge/incoming/latest"
+            # Replace latest/ with only this run's files so bridge does not re-ingest stale retailers.
+            find "catalog-bridge/incoming/latest" -type f -name '*.json' -delete
+            cp -f "$GITHUB_WORKSPACE"/.out/*.json "catalog-bridge/incoming/${DAY}/"
+            cp -f "$GITHUB_WORKSPACE"/.out/*.json "catalog-bridge/incoming/latest/"
+            git add -f catalog-bridge/incoming
+            if git diff --cached --quiet; then
+              echo "No catalog changes to commit"
+              echo "pushed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             git commit -m "catalog incoming ${DAY}"
-            git "${GIT_AUTH[@]}" push -u origin "HEAD:${BRANCH}"
+            if git "${GIT_AUTH[@]}" push -u origin "HEAD:${BRANCH}"; then
+              echo "pushed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Push conflict (attempt ${attempt}); retrying after pull..."
+            sleep $((attempt * 3))
+          done
+          echo "Failed to push staging after retries"
+          exit 1
+
+      - name: Trigger private bridge ingest
+        if: steps.staging.outputs.pushed == 'true'
+        env:
+          BRIDGE_DISPATCH_TOKEN: ${{ secrets.BRIDGE_DISPATCH_TOKEN }}
+          BRIDGE_REPO: ${{ secrets.BRIDGE_REPO }}
+          BRIDGE_WORKFLOW: ${{ secrets.BRIDGE_WORKFLOW }}
+          BRIDGE_REF: ${{ secrets.BRIDGE_REF }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_STORE: ${{ github.event.inputs.store }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BRIDGE_DISPATCH_TOKEN:-}" ] || [ -z "${BRIDGE_REPO:-}" ]; then
+            echo "Skipping bridge dispatch (BRIDGE_DISPATCH_TOKEN / BRIDGE_REPO not set)."
+            exit 0
           fi
+
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          repo = (os.environ.get("BRIDGE_REPO") or "").strip()
+          repo = repo.replace("https://github.com/", "").removesuffix(".git").strip("/")
+          workflow = (os.environ.get("BRIDGE_WORKFLOW") or "catalog-bridge.yml").strip() or "catalog-bridge.yml"
+          ref = (os.environ.get("BRIDGE_REF") or "main").strip() or "main"
+          token = (os.environ.get("BRIDGE_DISPATCH_TOKEN") or "").strip()
+          store = ""
+          if os.environ.get("EVENT_NAME") == "workflow_dispatch":
+              store = (os.environ.get("INPUT_STORE") or "").strip()
+
+          body = json.dumps(
+              {
+                  "ref": ref,
+                  "inputs": {
+                      "store": store,
+                      "mode": "apply",
+                      "local_validate_only": "false",
+                  },
+              }
+          ).encode("utf-8")
+          url = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow}/dispatches"
+          req = urllib.request.Request(
+              url,
+              data=body,
+              method="POST",
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "User-Agent": "CatalogFeedFetcher/0.1",
+                  "Content-Type": "application/json",
+              },
+          )
+          try:
+              with urllib.request.urlopen(req) as resp:
+                  print(f"bridge dispatch ok HTTP {resp.status} repo={repo} workflow={workflow} store={store or '(all latest)'}")
+          except urllib.error.HTTPError as exc:
+              detail = exc.read().decode("utf-8", errors="replace")[:500]
+              raise SystemExit(f"bridge dispatch failed HTTP {exc.code}: {detail}") from exc
+          PY

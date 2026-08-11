@@ -21,8 +21,21 @@ def load_config(path: Path) -> dict:
         return yaml.safe_load(fh) or {}
 
 
+def normalize_platform(platform: str) -> str:
+    platform = (platform or "").strip().lower()
+    aliases = {
+        "shopify_storefront_graphql": "shopify",
+        "shopify_graphql": "shopify",
+        "shopify_products_json": "shopify_products_json",
+        "products_json": "shopify_products_json",
+        "woocommerce_store_api": "woocommerce",
+        "woo": "woocommerce",
+    }
+    return aliases.get(platform, platform)
+
+
 def fetch_store(session: requests.Session, store: dict, defaults: dict) -> tuple[str, list]:
-    platform = (store.get("platform") or "").strip().lower()
+    platform = normalize_platform(str(store.get("platform") or ""))
     base_url = (store.get("base_url") or "").strip()
     delay = float(store.get("delay_seconds", defaults.get("delay_seconds", 2.0)))
     if not base_url:
@@ -50,6 +63,16 @@ def fetch_store(session: requests.Session, store: dict, defaults: dict) -> tuple
             )
             return "shopify_products_json", items
 
+    if platform == "shopify_products_json":
+        page_size = int(store.get("shopify_page_size", defaults.get("shopify_page_size", 100)))
+        items = fetch_shopify_products_json(
+            session,
+            base_url=base_url,
+            page_size=min(page_size, 100),
+            delay_seconds=max(delay, 2.0),
+        )
+        return "shopify_products_json", items
+
     if platform == "woocommerce":
         per_page = int(store.get("woo_per_page", defaults.get("woo_per_page", 50)))
         items = fetch_woocommerce_store_api(
@@ -63,17 +86,77 @@ def fetch_store(session: requests.Session, store: dict, defaults: dict) -> tuple
     raise ValueError(f"Unsupported platform: {platform}")
 
 
+def stores_from_inline(args: argparse.Namespace) -> list[dict]:
+    key = (args.inline_store or "").strip()
+    base_url = (args.base_url or "").strip()
+    platform = normalize_platform(args.platform or "")
+    if not key or not base_url or not platform:
+        return []
+    return [
+        {
+            "key": key,
+            "base_url": base_url,
+            "platform": platform,
+            "enabled": True,
+        }
+    ]
+
+
+def stores_from_json(path: Path) -> list[dict]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw, dict) and isinstance(raw.get("stores"), list):
+        raw = raw["stores"]
+    if not isinstance(raw, list):
+        raise ValueError("stores JSON must be a list or {stores: [...]}")
+    out: list[dict] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("key") or row.get("retailer_key") or "").strip()
+        base_url = str(row.get("base_url") or "").strip().rstrip("/")
+        platform = normalize_platform(str(row.get("platform") or row.get("feed_format") or ""))
+        if not key or not base_url or not platform:
+            continue
+        out.append(
+            {
+                "key": key,
+                "base_url": base_url,
+                "platform": platform,
+                "enabled": bool(row.get("enabled", True)),
+                "delay_seconds": row.get("delay_seconds"),
+            }
+        )
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Fetch public storefront catalogs")
     parser.add_argument("--config", default=str(ROOT / "stores.yml"))
     parser.add_argument("--out-dir", default=str(ROOT / ".out"))
-    parser.add_argument("--store", action="append", default=[], help="Only these retailer keys")
+    parser.add_argument("--store", action="append", default=[], help="Only these retailer keys (stores.yml mode)")
+    parser.add_argument("--stores-json", default="", help="Dynamic store list JSON file (preferred over stores.yml)")
+    parser.add_argument("--inline-store", default="", help="Single dynamic retailer key (with --base-url --platform)")
+    parser.add_argument("--base-url", default="", help="Single dynamic store base URL")
+    parser.add_argument("--platform", default="", help="shopify | shopify_products_json | woocommerce")
     parser.add_argument("--dry-run", action="store_true", help="Fetch but do not write files")
     args = parser.parse_args(argv)
 
-    cfg = load_config(Path(args.config))
-    defaults = cfg.get("defaults") or {}
-    stores = cfg.get("stores") or []
+    defaults: dict = {}
+    stores: list[dict] = []
+
+    inline = stores_from_inline(args)
+    if inline:
+        stores = inline
+        print("mode=inline dynamic store (no stores.yml)")
+    elif (args.stores_json or "").strip():
+        stores = stores_from_json(Path(args.stores_json))
+        print(f"mode=stores-json count={len(stores)}")
+    else:
+        cfg = load_config(Path(args.config))
+        defaults = cfg.get("defaults") or {}
+        stores = cfg.get("stores") or []
+        print("mode=stores.yml (legacy / backup)")
+
     only = set(args.store)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
