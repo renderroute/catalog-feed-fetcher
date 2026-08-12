@@ -34,16 +34,30 @@ def normalize_platform(platform: str) -> str:
     return aliases.get(platform, platform)
 
 
+def _num(value, fallback):
+    """Prefer store value when set; fall back when missing/None/invalid."""
+    if value is None or value == "":
+        value = fallback
+    if value is None or value == "":
+        return 0
+    return value
+
+
 def fetch_store(session: requests.Session, store: dict, defaults: dict) -> tuple[str, list]:
     platform = normalize_platform(str(store.get("platform") or ""))
     base_url = (store.get("base_url") or "").strip()
-    delay = float(store.get("delay_seconds", defaults.get("delay_seconds", 2.0)))
+    # stores_json may include delay_seconds: null — .get(key, default) still returns None when key exists.
+    delay = float(_num(store.get("delay_seconds"), defaults.get("delay_seconds", 2.0)) or 2.0)
     if not base_url:
         raise ValueError("base_url required")
 
     if platform == "shopify":
-        version = str(store.get("shopify_graphql_version", defaults.get("shopify_graphql_version", "2024-07")))
-        page_size = int(store.get("shopify_page_size", defaults.get("shopify_page_size", 100)))
+        version = str(
+            store.get("shopify_graphql_version")
+            or defaults.get("shopify_graphql_version")
+            or "2024-07"
+        )
+        page_size = int(_num(store.get("shopify_page_size"), defaults.get("shopify_page_size", 100)) or 100)
         try:
             items = fetch_shopify_graphql(
                 session,
@@ -64,7 +78,7 @@ def fetch_store(session: requests.Session, store: dict, defaults: dict) -> tuple
             return "shopify_products_json", items
 
     if platform == "shopify_products_json":
-        page_size = int(store.get("shopify_page_size", defaults.get("shopify_page_size", 100)))
+        page_size = int(_num(store.get("shopify_page_size"), defaults.get("shopify_page_size", 100)) or 100)
         items = fetch_shopify_products_json(
             session,
             base_url=base_url,
@@ -74,7 +88,7 @@ def fetch_store(session: requests.Session, store: dict, defaults: dict) -> tuple
         return "shopify_products_json", items
 
     if platform == "woocommerce":
-        per_page = int(store.get("woo_per_page", defaults.get("woo_per_page", 50)))
+        per_page = int(_num(store.get("woo_per_page"), defaults.get("woo_per_page", 50)) or 50)
         items = fetch_woocommerce_store_api(
             session,
             base_url=base_url,
@@ -117,15 +131,15 @@ def stores_from_json(path: Path) -> list[dict]:
         platform = normalize_platform(str(row.get("platform") or row.get("feed_format") or ""))
         if not key or not base_url or not platform:
             continue
-        out.append(
-            {
-                "key": key,
-                "base_url": base_url,
-                "platform": platform,
-                "enabled": bool(row.get("enabled", True)),
-                "delay_seconds": row.get("delay_seconds"),
-            }
-        )
+        row_out = {
+            "key": key,
+            "base_url": base_url,
+            "platform": platform,
+            "enabled": bool(row.get("enabled", True)),
+        }
+        if row.get("delay_seconds") is not None and row.get("delay_seconds") != "":
+            row_out["delay_seconds"] = row.get("delay_seconds")
+        out.append(row_out)
     return out
 
 
