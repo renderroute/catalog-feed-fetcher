@@ -19,6 +19,10 @@ on:
         description: 'shopify | shopify_products_json | woocommerce'
         required: false
         default: ''
+      stores_json:
+        description: 'JSON array of {key, base_url, platform} from the private orchestrate job'
+        required: false
+        default: ''
   repository_dispatch:
     types: [fetch-catalogs]
 
@@ -48,53 +52,64 @@ jobs:
           set -euo pipefail
           mkdir -p .out /tmp/catalog-fetch
 
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            python - <<'PY'
+          python - <<'PY'
           import json
           import os
           from pathlib import Path
 
           event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
-          stores = (event.get("client_payload") or {}).get("stores")
-          if not isinstance(stores, list) or not stores:
-              raise SystemExit("client_payload.stores must be a non-empty list")
+          name = os.environ.get("GITHUB_EVENT_NAME") or ""
+          out = Path(os.environ["GITHUB_OUTPUT"])
           path = Path("/tmp/catalog-fetch/stores.json")
-          path.write_text(json.dumps(stores), encoding="utf-8")
-          print(f"dynamic stores: {len(stores)}")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-              fh.write("mode=repository_dispatch\n")
-              fh.write(f"stores_json={path}\n")
-              fh.write("store=\n")
-              fh.write("base_url=\n")
-              fh.write("platform=\n")
+
+          def write_batch(stores, mode: str) -> None:
+              if not isinstance(stores, list) or not stores:
+                  raise SystemExit(f"{mode}: stores must be a non-empty list")
+              path.write_text(json.dumps(stores), encoding="utf-8")
+              print(f"{mode} stores: {len(stores)}")
+              with out.open("a", encoding="utf-8") as fh:
+                  fh.write(f"mode={mode}\n")
+                  fh.write(f"stores_json={path}\n")
+                  fh.write("store=\n")
+                  fh.write("base_url=\n")
+                  fh.write("platform=\n")
+
+          if name == "repository_dispatch":
+              write_batch((event.get("client_payload") or {}).get("stores"), "repository_dispatch")
+              raise SystemExit(0)
+
+          inputs = event.get("inputs") or {}
+          raw = (inputs.get("stores_json") or "").strip()
+          if raw:
+              stores = json.loads(raw)
+              write_batch(stores, "stores_json")
+              raise SystemExit(0)
+
+          store = (inputs.get("store") or "").strip()
+          base = (inputs.get("base_url") or "").strip()
+          platform = (inputs.get("platform") or "").strip()
+          with out.open("a", encoding="utf-8") as fh:
+              fh.write(f"store={store}\n")
+              fh.write(f"base_url={base}\n")
+              fh.write(f"platform={platform}\n")
+              if store and base and platform:
+                  fh.write("mode=inline\n")
+                  fh.write("stores_json=\n")
+              elif store:
+                  fh.write("mode=stores_yml\n")
+                  fh.write("stores_json=\n")
+              else:
+                  raise SystemExit(
+                      "Provide stores_json, or store+base_url+platform, or store only (legacy stores.yml)."
+                  )
           PY
-            exit 0
-          fi
-
-          STORE="${{ github.event.inputs.store }}"
-          BASE="${{ github.event.inputs.base_url }}"
-          PLATFORM="${{ github.event.inputs.platform }}"
-          echo "store=${STORE}" >> "$GITHUB_OUTPUT"
-          echo "base_url=${BASE}" >> "$GITHUB_OUTPUT"
-          echo "platform=${PLATFORM}" >> "$GITHUB_OUTPUT"
-
-          if [ -n "$BASE" ] && [ -n "$PLATFORM" ] && [ -n "$STORE" ]; then
-            echo "mode=inline" >> "$GITHUB_OUTPUT"
-            echo "stores_json=" >> "$GITHUB_OUTPUT"
-          elif [ -n "$STORE" ]; then
-            echo "mode=stores_yml" >> "$GITHUB_OUTPUT"
-            echo "stores_json=" >> "$GITHUB_OUTPUT"
-          else
-            echo "Provide store+base_url+platform (production), or store only (legacy stores.yml)."
-            exit 1
-          fi
 
       - name: Fetch catalogs
         run: |
           set -euo pipefail
           MODE="${{ steps.prep.outputs.mode }}"
           mkdir -p .out
-          if [ "$MODE" = "repository_dispatch" ]; then
+          if [ "$MODE" = "repository_dispatch" ] || [ "$MODE" = "stores_json" ]; then
             python -m src.fetch_all --out-dir .out --stores-json "${{ steps.prep.outputs.stores_json }}"
           elif [ "$MODE" = "inline" ]; then
             python -m src.fetch_all --out-dir .out \
