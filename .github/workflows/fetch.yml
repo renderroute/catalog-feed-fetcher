@@ -105,10 +105,13 @@ jobs:
           PY
 
       - name: Fetch catalogs
+        id: fetch
         run: |
           set -euo pipefail
           MODE="${{ steps.prep.outputs.mode }}"
           mkdir -p .out
+          # Do not abort the job when some stores fail — ingest the JSON that was written.
+          set +e
           if [ "$MODE" = "repository_dispatch" ] || [ "$MODE" = "stores_json" ]; then
             python -m src.fetch_all --out-dir .out --stores-json "${{ steps.prep.outputs.stores_json }}"
           elif [ "$MODE" = "inline" ]; then
@@ -119,12 +122,36 @@ jobs:
           else
             python -m src.fetch_all --out-dir .out --store "${{ steps.prep.outputs.store }}"
           fi
+          FETCH_RC=$?
+          set -e
           echo "Output directory:"
-          ls -la .out
-          test -n "$(ls -A .out/*.json 2>/dev/null)" || {
+          ls -la .out || true
+          JSON_COUNT=$(find .out -maxdepth 1 -type f -name '*.json' ! -name '_fetch_status.json' | wc -l | tr -d ' ')
+          if [ "${JSON_COUNT}" = "0" ]; then
             echo "No JSON written under .out/ — check store key / fetch errors above."
+            echo "partial_fail=false" >> "$GITHUB_OUTPUT"
             exit 1
-          }
+          fi
+          PARTIAL=false
+          if [ -f .out/_fetch_status.json ]; then
+            python - <<'PY'
+          import json
+          from pathlib import Path
+          st = json.loads(Path(".out/_fetch_status.json").read_text(encoding="utf-8"))
+          failed = int(st.get("failed") or 0)
+          ok = int(st.get("ok") or 0)
+          print(f"fetch status ok={ok} failed={failed}")
+          if failed > 0:
+              Path("/tmp/catalog-fetch-partial").write_text("1", encoding="utf-8")
+          PY
+          elif [ "$FETCH_RC" != "0" ]; then
+            echo 1 > /tmp/catalog-fetch-partial
+          fi
+          if [ -f /tmp/catalog-fetch-partial ]; then
+            PARTIAL=true
+            echo "::warning::Some stores failed. Successful catalogs will still be staged and ingested."
+          fi
+          echo "partial_fail=${PARTIAL}" >> "$GITHUB_OUTPUT"
 
       # upload-artifact respects .gitignore; .out/ is ignored, so copy first.
       - name: Stage artifacts for upload
@@ -132,7 +159,7 @@ jobs:
           set -euo pipefail
           rm -rf staged-catalogs
           mkdir -p staged-catalogs
-          cp -f .out/*.json staged-catalogs/
+          find .out -maxdepth 1 -type f -name '*.json' ! -name '_fetch_status.json' -exec cp -f {} staged-catalogs/ \;
           ls -la staged-catalogs
 
       - name: Upload artifacts
@@ -202,8 +229,10 @@ jobs:
             mkdir -p "catalog-bridge/incoming/latest"
             # Replace latest/ with only this run's files so bridge does not re-ingest stale retailers.
             find "catalog-bridge/incoming/latest" -type f -name '*.json' -delete
-            cp -f "$GITHUB_WORKSPACE"/.out/*.json "catalog-bridge/incoming/${DAY}/"
-            cp -f "$GITHUB_WORKSPACE"/.out/*.json "catalog-bridge/incoming/latest/"
+            find "$GITHUB_WORKSPACE/.out" -maxdepth 1 -type f -name '*.json' ! -name '_fetch_status.json' \
+              -exec cp -f {} "catalog-bridge/incoming/${DAY}/" \;
+            find "$GITHUB_WORKSPACE/.out" -maxdepth 1 -type f -name '*.json' ! -name '_fetch_status.json' \
+              -exec cp -f {} "catalog-bridge/incoming/latest/" \;
             git add -f catalog-bridge/incoming
             if git diff --cached --quiet; then
               echo "No catalog changes to commit"
@@ -282,3 +311,12 @@ jobs:
               detail = exc.read().decode("utf-8", errors="replace")[:500]
               raise SystemExit(f"bridge dispatch failed HTTP {exc.code}: {detail}") from exc
           PY
+
+      - name: Report partial fetch failures
+        if: always() && steps.fetch.outputs.partial_fail == 'true'
+        run: |
+          echo "::warning::One or more stores failed. Successful catalogs were still staged and sent to ingest."
+          if [ -f .out/_fetch_status.json ]; then
+            python -c "import json; print(open('.out/_fetch_status.json',encoding='utf-8').read())"
+          fi
+          exit 1

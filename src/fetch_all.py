@@ -178,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     session = requests.Session()
     ok = 0
     failed = 0
+    failed_keys: list[str] = []
 
     for store in stores:
         key = str(store.get("key") or "").strip()
@@ -205,10 +206,22 @@ def main(argv: list[str] | None = None) -> int:
             ok += 1
         except Exception as exc:
             failed += 1
+            failed_keys.append(key)
             print(f"  FAIL {key}: {exc}", file=sys.stderr)
 
     print(f"done ok={ok} failed={failed}")
-    return 1 if failed else 0
+    if failed_keys:
+        print(f"failed stores: {', '.join(failed_keys)}", file=sys.stderr)
+    if not args.dry_run:
+        status_path = out_dir / "_fetch_status.json"
+        status_path.write_text(
+            json.dumps({"ok": ok, "failed": failed, "failed_keys": failed_keys}, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    # Partial success is still useful: caller should ingest written JSON, then treat failed>0 as a warning.
+    if ok == 0 and failed > 0:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
