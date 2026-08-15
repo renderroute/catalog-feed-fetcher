@@ -6,7 +6,7 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
-from . import USER_AGENT, money
+from .woo_shop_html import fetch_woocommerce_shop_html
 
 # Keep payload lean — omit bulky HTML fields from Store API responses.
 FIELDS = (
@@ -113,6 +113,7 @@ def _fetch_pages(
     per_page: int | None,
     delay_seconds: float,
     use_bot_user_agent: bool = True,
+    extra_params: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     page = 1
     items: list[dict[str, Any]] = []
@@ -120,6 +121,8 @@ def _fetch_pages(
 
     while True:
         params: dict[str, Any] = {"page": page, "_fields": FIELDS}
+        if extra_params:
+            params.update(extra_params)
         if per_page:
             params["per_page"] = int(per_page)
         headers = {"Accept": "application/json"}
@@ -227,6 +230,31 @@ def fetch_woocommerce_store_api(
             if "HTTP 403" not in str(exc):
                 raise
             print(f"  per_page={size} still HTTP 403", flush=True)
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("Woo Store API HTTP 403 (likely bot/CDN block)")
+    print("  Cookie path API still 403; trying rest_route", flush=True)
+    for size in COOKIE_PAGE_SIZES:
+        print(f"  rest_route trying per_page={size}", flush=True)
+        try:
+            return _fetch_pages(
+                browser,
+                endpoint=origin_ok,
+                per_page=size,
+                delay_seconds=delay_seconds,
+                use_bot_user_agent=False,
+                extra_params={"rest_route": "/wc/store/v1/products"},
+            )
+        except RuntimeError as exc:
+            last_exc = exc
+            if "HTTP 403" not in str(exc):
+                raise
+            print(f"  rest_route per_page={size} still HTTP 403", flush=True)
+    try:
+        return fetch_woocommerce_shop_html(
+            browser,
+            origin=origin_ok,
+            delay_seconds=min(1.0, float(delay_seconds) if delay_seconds else 1.0),
+        )
+    except Exception as html_exc:
+        print(f"  Shop HTML fallback failed ({html_exc})", flush=True)
+        if last_exc is not None:
+            raise last_exc
+        raise
