@@ -88,12 +88,14 @@ def fetch_store(session: requests.Session, store: dict, defaults: dict) -> tuple
         return "shopify_products_json", items
 
     if platform == "woocommerce":
+        omit = bool(store.get("woo_polite") or store.get("omit_per_page"))
         per_page = int(_num(store.get("woo_per_page"), defaults.get("woo_per_page", 50)) or 50)
         items = fetch_woocommerce_store_api(
             session,
             base_url=base_url,
-            per_page=per_page,
+            per_page=None if omit else per_page,
             delay_seconds=delay,
+            omit_per_page=omit,
         )
         return "woocommerce_store_api", items
 
@@ -139,6 +141,8 @@ def stores_from_json(path: Path) -> list[dict]:
         }
         if row.get("delay_seconds") is not None and row.get("delay_seconds") != "":
             row_out["delay_seconds"] = row.get("delay_seconds")
+        if row.get("woo_polite") or row.get("omit_per_page"):
+            row_out["woo_polite"] = True
         out.append(row_out)
     return out
 
@@ -179,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     ok = 0
     failed = 0
     failed_keys: list[str] = []
+    failed_rows: list[dict] = []
 
     for store in stores:
         key = str(store.get("key") or "").strip()
@@ -207,6 +212,9 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             failed += 1
             failed_keys.append(key)
+            err = str(exc)
+            http_status = 403 if "403" in err else 0
+            failed_rows.append({"key": key, "retailer_key": key, "error": err, "http_status": http_status})
             print(f"  FAIL {key}: {exc}", file=sys.stderr)
 
     print(f"done ok={ok} failed={failed}")
@@ -215,9 +223,18 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run:
         status_path = out_dir / "_fetch_status.json"
         status_path.write_text(
-            json.dumps({"ok": ok, "failed": failed, "failed_keys": failed_keys}, separators=(",", ":")),
+            json.dumps(
+                {"ok": ok, "failed": failed, "failed_keys": failed_keys, "failures": failed_rows},
+                separators=(",", ":"),
+            ),
             encoding="utf-8",
         )
+        if failed_rows:
+            fail_path = out_dir / "_failures.json"
+            fail_path.write_text(
+                json.dumps({"failures": failed_rows}, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
     # Partial success is still useful: caller should ingest written JSON, then treat failed>0 as a warning.
     if ok == 0 and failed > 0:
         return 1
