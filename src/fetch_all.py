@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -11,9 +13,16 @@ import yaml
 from . import build_envelope
 from .shopify_graphql import fetch_shopify_graphql
 from .shopify_products_json import fetch_shopify_products_json
-from .woocommerce_store_api import fetch_woocommerce_store_api
+from .woocommerce_store_api import WooNeedsCookieRetry, fetch_woocommerce_store_api
 
 ROOT = Path(__file__).resolve().parents[1]
+_PRINT_LOCK = threading.Lock()
+SLOW_WORKERS = 2
+
+
+def log(msg: str, *, error: bool = False) -> None:
+    with _PRINT_LOCK:
+        print(msg, file=sys.stderr if error else sys.stdout, flush=True)
 
 
 def load_config(path: Path) -> dict:
@@ -43,10 +52,15 @@ def _num(value, fallback):
     return value
 
 
-def fetch_store(session: requests.Session, store: dict, defaults: dict) -> tuple[str, list]:
+def fetch_store(
+    session: requests.Session,
+    store: dict,
+    defaults: dict,
+    *,
+    cookie_retry: bool = False,
+) -> tuple[str, list]:
     platform = normalize_platform(str(store.get("platform") or ""))
     base_url = (store.get("base_url") or "").strip()
-    # stores_json may include delay_seconds: null — .get(key, default) still returns None when key exists.
     delay = float(_num(store.get("delay_seconds"), defaults.get("delay_seconds", 2.0)) or 2.0)
     if not base_url:
         raise ValueError("base_url required")
@@ -68,7 +82,7 @@ def fetch_store(session: requests.Session, store: dict, defaults: dict) -> tuple
             )
             return "shopify_storefront_graphql", items
         except Exception as exc:
-            print(f"  GraphQL failed ({exc}); falling back to products.json", file=sys.stderr)
+            log(f"  GraphQL failed ({exc}); falling back to products.json", error=True)
             items = fetch_shopify_products_json(
                 session,
                 base_url=base_url,
@@ -88,14 +102,14 @@ def fetch_store(session: requests.Session, store: dict, defaults: dict) -> tuple
         return "shopify_products_json", items
 
     if platform == "woocommerce":
-        omit = bool(store.get("woo_polite") or store.get("omit_per_page"))
         per_page = int(_num(store.get("woo_per_page"), defaults.get("woo_per_page", 50)) or 50)
         items = fetch_woocommerce_store_api(
             session,
             base_url=base_url,
-            per_page=None if omit else per_page,
+            per_page=per_page,
             delay_seconds=delay,
-            omit_per_page=omit,
+            omit_per_page=False,
+            cookie_retry=cookie_retry,
         )
         return "woocommerce_store_api", items
 
@@ -141,10 +155,223 @@ def stores_from_json(path: Path) -> list[dict]:
         }
         if row.get("delay_seconds") is not None and row.get("delay_seconds") != "":
             row_out["delay_seconds"] = row.get("delay_seconds")
-        if row.get("woo_polite") or row.get("omit_per_page"):
-            row_out["woo_polite"] = True
         out.append(row_out)
     return out
+
+
+def _queue_row(store: dict) -> dict:
+    row = {
+        "key": str(store.get("key") or "").strip(),
+        "base_url": str(store.get("base_url") or "").strip(),
+        "platform": normalize_platform(str(store.get("platform") or "")),
+        "enabled": True,
+    }
+    if store.get("delay_seconds") is not None and store.get("delay_seconds") != "":
+        row["delay_seconds"] = store.get("delay_seconds")
+    return row
+
+
+def _write_status(out_dir: Path, *, ok: int, failed: int, failed_keys: list, failed_rows: list, deferred_keys: list) -> None:
+    status_path = out_dir / "_fetch_status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "ok": ok,
+                "failed": failed,
+                "failed_keys": failed_keys,
+                "failures": failed_rows,
+                "deferred_keys": deferred_keys,
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    fail_path = out_dir / "_failures.json"
+    if failed_rows:
+        fail_path.write_text(
+            json.dumps({"failures": failed_rows}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    elif fail_path.exists():
+        fail_path.unlink()
+
+
+def _write_bridge_keys(out_dir: Path, keys: list[str]) -> None:
+    (out_dir / "_bridge_keys.txt").write_text(",".join(keys), encoding="utf-8")
+
+
+def _write_catalog(out_dir: Path, key: str, feed_format: str, items: list, dry_run: bool) -> None:
+    envelope = build_envelope(retailer_key=key, feed_format=feed_format, items=items)
+    log(f"  ok format={feed_format} items={len(items)}")
+    if not dry_run:
+        path = out_dir / f"{key}.json"
+        path.write_text(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        log(f"  wrote {path}")
+
+
+def _run_one_store(
+    store: dict,
+    defaults: dict,
+    *,
+    cookie_retry: bool,
+    out_dir: Path,
+    dry_run: bool,
+) -> tuple[str, str, Exception | None]:
+    """Return (key, outcome, error) where outcome is ok|defer|fail."""
+    key = str(store.get("key") or "").strip()
+    session = requests.Session()
+    try:
+        feed_format, items = fetch_store(session, store, defaults, cookie_retry=cookie_retry)
+        _write_catalog(out_dir, key, feed_format, items, dry_run)
+        return key, "ok", None
+    except WooNeedsCookieRetry as exc:
+        if cookie_retry:
+            return key, "fail", exc
+        return key, "defer", exc
+    except Exception as exc:
+        return key, "fail", exc
+
+
+def _collect_enabled(stores: list[dict], only: set[str]) -> list[dict]:
+    out: list[dict] = []
+    for store in stores:
+        key = str(store.get("key") or "").strip()
+        if not key:
+            continue
+        if only and key not in only:
+            continue
+        if not store.get("enabled", True):
+            log(f"skip {key} (disabled)")
+            continue
+        out.append(store)
+    return out
+
+
+def run_fast_phase(stores: list[dict], defaults: dict, out_dir: Path, dry_run: bool) -> int:
+    enabled = _collect_enabled(stores, set())
+    ok = 0
+    failed = 0
+    failed_keys: list[str] = []
+    failed_rows: list[dict] = []
+    deferred: list[dict] = []
+    bridge_keys: list[str] = []
+
+    log(f"phase=fast stores={len(enabled)}")
+    for store in enabled:
+        key = str(store.get("key") or "").strip()
+        log(f"fetch {key} ...")
+        _key, outcome, exc = _run_one_store(
+            store, defaults, cookie_retry=False, out_dir=out_dir, dry_run=dry_run
+        )
+        if outcome == "ok":
+            ok += 1
+            bridge_keys.append(key)
+        elif outcome == "defer":
+            log(f"  defer {key} to cookie path (HTTP 403)")
+            deferred.append(_queue_row(store))
+        else:
+            failed += 1
+            failed_keys.append(key)
+            err = str(exc)
+            failed_rows.append(
+                {
+                    "key": key,
+                    "retailer_key": key,
+                    "error": err,
+                    "http_status": 403 if "403" in err else 0,
+                }
+            )
+            log(f"  FAIL {key}: {exc}", error=True)
+
+    deferred_keys = [str(s["key"]) for s in deferred]
+    if not dry_run:
+        (out_dir / "_slow_queue.json").write_text(
+            json.dumps({"stores": deferred}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        _write_bridge_keys(out_dir, bridge_keys)
+        _write_status(
+            out_dir,
+            ok=ok,
+            failed=failed,
+            failed_keys=failed_keys,
+            failed_rows=failed_rows,
+            deferred_keys=deferred_keys,
+        )
+    log(f"done phase=fast ok={ok} deferred={len(deferred)} failed={failed}")
+    if failed and ok == 0 and not deferred:
+        return 1
+    return 0
+
+
+def run_slow_phase(stores: list[dict], defaults: dict, out_dir: Path, dry_run: bool) -> int:
+    enabled = _collect_enabled(stores, set())
+    prior = {}
+    status_path = out_dir / "_fetch_status.json"
+    if status_path.exists():
+        try:
+            prior = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            prior = {}
+    ok = int(prior.get("ok") or 0)
+    failed = int(prior.get("failed") or 0)
+    failed_keys = list(prior.get("failed_keys") or [])
+    failed_rows = list(prior.get("failures") or [])
+    bridge_keys: list[str] = []
+    lock = threading.Lock()
+
+    log(f"phase=slow stores={len(enabled)} workers={SLOW_WORKERS}")
+    if not enabled:
+        if not dry_run:
+            _write_bridge_keys(out_dir, [])
+        log("done phase=slow ok=0 failed=0")
+        return 0
+
+    def worker(store: dict) -> None:
+        nonlocal ok, failed
+        key = str(store.get("key") or "").strip()
+        log(f"fetch {key} (cookie path) ...")
+        _key, outcome, exc = _run_one_store(
+            store, defaults, cookie_retry=True, out_dir=out_dir, dry_run=dry_run
+        )
+        with lock:
+            if outcome == "ok":
+                ok += 1
+                bridge_keys.append(key)
+            else:
+                failed += 1
+                failed_keys.append(key)
+                err = str(exc)
+                failed_rows.append(
+                    {
+                        "key": key,
+                        "retailer_key": key,
+                        "error": err,
+                        "http_status": 403 if exc and "403" in err else 0,
+                    }
+                )
+                log(f"  FAIL {key}: {exc}", error=True)
+
+    workers = min(SLOW_WORKERS, len(enabled))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [pool.submit(worker, store) for store in enabled]
+        for fut in as_completed(futs):
+            fut.result()
+
+    if not dry_run:
+        _write_bridge_keys(out_dir, bridge_keys)
+        _write_status(
+            out_dir,
+            ok=ok,
+            failed=failed,
+            failed_keys=failed_keys,
+            failed_rows=failed_rows,
+            deferred_keys=[],
+        )
+    log(f"done phase=slow batch_ok={len(bridge_keys)} total_ok={ok} failed={failed}")
+    if failed and ok == 0:
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -157,6 +384,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default="", help="Single dynamic store base URL")
     parser.add_argument("--platform", default="", help="shopify | shopify_products_json | woocommerce")
     parser.add_argument("--dry-run", action="store_true", help="Fetch but do not write files")
+    parser.add_argument(
+        "--phase",
+        choices=("fast", "slow", "both"),
+        default="both",
+        help="fast=quick API only (403 Woo deferred); slow=homepage cookies; both=fast then slow",
+    )
+    parser.add_argument("--slow-queue", default="", help="JSON file from phase=fast (_slow_queue.json)")
     args = parser.parse_args(argv)
 
     defaults: dict = {}
@@ -165,80 +399,44 @@ def main(argv: list[str] | None = None) -> int:
     inline = stores_from_inline(args)
     if inline:
         stores = inline
-        print("mode=inline dynamic store (no stores.yml)")
+        log("mode=inline dynamic store (no stores.yml)")
     elif (args.stores_json or "").strip():
         stores = stores_from_json(Path(args.stores_json))
-        print(f"mode=stores-json count={len(stores)}")
+        log(f"mode=stores-json count={len(stores)}")
     else:
         cfg = load_config(Path(args.config))
         defaults = cfg.get("defaults") or {}
         stores = cfg.get("stores") or []
-        print("mode=stores.yml (legacy / backup)")
+        log("mode=stores.yml (legacy / backup)")
 
     only = set(args.store)
+    if only:
+        stores = [s for s in stores if str(s.get("key") or "").strip() in only]
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    session = requests.Session()
-    ok = 0
-    failed = 0
-    failed_keys: list[str] = []
-    failed_rows: list[dict] = []
+    if args.phase == "slow":
+        queue_path = Path(args.slow_queue) if (args.slow_queue or "").strip() else (out_dir / "_slow_queue.json")
+        if queue_path.exists():
+            stores = stores_from_json(queue_path)
+            log(f"loaded slow queue count={len(stores)} from {queue_path}")
+        else:
+            log(f"no slow queue at {queue_path}")
+            stores = []
+        return run_slow_phase(stores, defaults, out_dir, args.dry_run)
 
-    for store in stores:
-        key = str(store.get("key") or "").strip()
-        if not key:
-            continue
-        if only and key not in only:
-            continue
-        if not store.get("enabled", True):
-            print(f"skip {key} (disabled)")
-            continue
-
-        print(f"fetch {key} ...")
-        try:
-            feed_format, items = fetch_store(session, store, defaults)
-            envelope = build_envelope(
-                retailer_key=key,
-                feed_format=feed_format,
-                items=items,
-            )
-            print(f"  ok format={feed_format} items={len(items)}")
-            if not args.dry_run:
-                path = out_dir / f"{key}.json"
-                path.write_text(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-                print(f"  wrote {path}")
-            ok += 1
-        except Exception as exc:
-            failed += 1
-            failed_keys.append(key)
-            err = str(exc)
-            http_status = 403 if "403" in err else 0
-            failed_rows.append({"key": key, "retailer_key": key, "error": err, "http_status": http_status})
-            print(f"  FAIL {key}: {exc}", file=sys.stderr)
-
-    print(f"done ok={ok} failed={failed}")
-    if failed_keys:
-        print(f"failed stores: {', '.join(failed_keys)}", file=sys.stderr)
-    if not args.dry_run:
-        status_path = out_dir / "_fetch_status.json"
-        status_path.write_text(
-            json.dumps(
-                {"ok": ok, "failed": failed, "failed_keys": failed_keys, "failures": failed_rows},
-                separators=(",", ":"),
-            ),
-            encoding="utf-8",
-        )
-        if failed_rows:
-            fail_path = out_dir / "_failures.json"
-            fail_path.write_text(
-                json.dumps({"failures": failed_rows}, ensure_ascii=False, separators=(",", ":")),
-                encoding="utf-8",
-            )
-    # Partial success is still useful: caller should ingest written JSON, then treat failed>0 as a warning.
-    if ok == 0 and failed > 0:
-        return 1
-    return 0
+    rc = run_fast_phase(stores, defaults, out_dir, args.dry_run)
+    if args.phase == "fast":
+        return rc
+    queue_path = out_dir / "_slow_queue.json"
+    slow_stores: list[dict] = []
+    if queue_path.exists():
+        slow_stores = stores_from_json(queue_path)
+    if not slow_stores:
+        return rc
+    slow_rc = run_slow_phase(slow_stores, defaults, out_dir, args.dry_run)
+    return slow_rc or rc
 
 
 if __name__ == "__main__":

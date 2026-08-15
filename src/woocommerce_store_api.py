@@ -13,6 +13,15 @@ FIELDS = (
     "id,name,permalink,sku,prices,images,categories,brands,"
     "is_in_stock,on_sale,gtin,global_unique_id"
 )
+# After homepage cookies: try the fast size first, then step down if Cloudflare still 403s.
+COOKIE_PAGE_SIZES = (50, 25, 10)
+
+
+class WooNeedsCookieRetry(RuntimeError):
+    """Fast path hit HTTP 403 — caller should queue the shop for homepage-cookie fetch."""
+
+    def __init__(self) -> None:
+        super().__init__("Woo Store API HTTP 403 (likely bot/CDN block)")
 
 
 def _endpoint(base_url: str) -> str:
@@ -163,57 +172,61 @@ def fetch_woocommerce_store_api(
     per_page: int | None = 50,
     delay_seconds: float = 2.0,
     omit_per_page: bool = False,
+    cookie_retry: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Fetch Woo Store API products.
-    Fast path uses per_page. HTTP 403 → small pages, then homepage cookie + API retry.
-    omit_per_page=True starts in polite mode (WP remembered Cloudflare shops).
+
+    Fast path (cookie_retry=False): per_page 50. HTTP 403 raises WooNeedsCookieRetry
+    (no hour-long 10-per-page crawl).
+
+    Cookie path: open homepage, then try 50 → 25 → 10.
     """
     endpoint = _endpoint(base_url)
     origin = _shop_origin(base_url)
-    polite = bool(omit_per_page) or per_page in (None, 0)
-    last_exc: BaseException | None = None
+    page_size = 50 if per_page in (None, 0) else int(per_page)
+    if omit_per_page and not cookie_retry:
+        page_size = 50
 
-    try:
-        return _fetch_pages(
-            session,
-            endpoint=endpoint,
-            per_page=None if polite else (int(per_page) if per_page else 50),
-            delay_seconds=delay_seconds,
-            use_bot_user_agent=True,
-        )
-    except RuntimeError as exc:
-        last_exc = exc
-        if "HTTP 403" not in str(exc):
-            raise
-        if not polite:
-            print("  Woo HTTP 403 with per_page; retrying polite paging (page only)", flush=True)
-            try:
-                return _fetch_pages(
-                    session,
-                    endpoint=endpoint,
-                    per_page=None,
-                    delay_seconds=delay_seconds,
-                    use_bot_user_agent=True,
-                )
-            except RuntimeError as polite_exc:
-                last_exc = polite_exc
-                if "HTTP 403" not in str(polite_exc):
-                    raise
+    if not cookie_retry:
+        try:
+            return _fetch_pages(
+                session,
+                endpoint=endpoint,
+                per_page=page_size,
+                delay_seconds=delay_seconds,
+                use_bot_user_agent=True,
+            )
+        except RuntimeError as exc:
+            if "HTTP 403" not in str(exc):
+                raise
+            raise WooNeedsCookieRetry() from exc
 
     print("  Woo HTTP 403; homepage first then API (cookie retry)", flush=True)
+    origin_ok = origin
     try:
         browser = _browser_session()
-        _warmup_homepage(browser, origin)
-        return _fetch_pages(
-            browser,
-            endpoint=endpoint,
-            per_page=None,
-            delay_seconds=delay_seconds,
-            use_bot_user_agent=False,
-        )
+        _warmup_homepage(browser, origin_ok)
     except Exception as cookie_exc:
-        print(f"  Homepage/API cookie retry failed ({cookie_exc})", flush=True)
-        if last_exc is not None:
-            raise last_exc
+        print(f"  Homepage cookie warmup failed ({cookie_exc})", flush=True)
         raise
+
+    last_exc: BaseException | None = None
+    for size in COOKIE_PAGE_SIZES:
+        print(f"  Cookie path trying per_page={size}", flush=True)
+        try:
+            return _fetch_pages(
+                browser,
+                endpoint=endpoint,
+                per_page=size,
+                delay_seconds=delay_seconds,
+                use_bot_user_agent=False,
+            )
+        except RuntimeError as exc:
+            last_exc = exc
+            if "HTTP 403" not in str(exc):
+                raise
+            print(f"  per_page={size} still HTTP 403", flush=True)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Woo Store API HTTP 403 (likely bot/CDN block)")
