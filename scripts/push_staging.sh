@@ -2,9 +2,15 @@
 # Merge catalog JSON from .out into the private staging branch (does not wipe other shops).
 set -euo pipefail
 
+gh_out() {
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    echo "$1" >> "$GITHUB_OUTPUT"
+  fi
+}
+
 if [ -z "${STAGING_PUSH_TOKEN:-}" ] || [ -z "${STAGING_REPO:-}" ]; then
   echo "Skipping staging push (STAGING_PUSH_TOKEN / STAGING_REPO not set)."
-  echo "pushed=false" >> "$GITHUB_OUTPUT"
+  gh_out "pushed=false"
   exit 0
 fi
 
@@ -13,7 +19,7 @@ CATALOG_COUNT=$(find "$SRC" -maxdepth 1 -type f -name '*.json' ! -name '_*' | wc
 FAIL_COUNT=$(find "$SRC" -maxdepth 1 -type f -name '_failures.json' | wc -l | tr -d ' ')
 if [ "$CATALOG_COUNT" = "0" ] && [ "$FAIL_COUNT" = "0" ]; then
   echo "Nothing to stage (no catalogs, no failure report)."
-  echo "pushed=false" >> "$GITHUB_OUTPUT"
+  gh_out "pushed=false"
   exit 0
 fi
 
@@ -74,12 +80,12 @@ for attempt in 1 2 3 4 5 6; do
   git add -f catalog-bridge/incoming
   if git diff --cached --quiet; then
     echo "No catalog changes to commit"
-    echo "pushed=true" >> "$GITHUB_OUTPUT"
+    gh_out "pushed=true"
     exit 0
   fi
   git commit -m "catalog incoming ${DAY}"
   if git "${GIT_AUTH[@]}" push -u origin "HEAD:${BRANCH}"; then
-    echo "pushed=true" >> "$GITHUB_OUTPUT"
+    gh_out "pushed=true"
     exit 0
   fi
   echo "Push conflict (attempt ${attempt}); retrying after pull..."

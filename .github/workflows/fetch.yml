@@ -163,6 +163,15 @@ jobs:
       - name: Fetch slow catalogs (cookie path, 2 at a time)
         id: fetch_slow
         if: steps.fetch_fast.outcome == 'success' && steps.fetch_fast.outputs.slow_count != '0'
+        env:
+          CATALOG_PUSH_ON_FINISH: '1'
+          STAGING_PUSH_TOKEN: ${{ secrets.STAGING_PUSH_TOKEN }}
+          STAGING_REPO: ${{ secrets.STAGING_REPO }}
+          STAGING_BRANCH: ${{ secrets.STAGING_BRANCH }}
+          BRIDGE_DISPATCH_TOKEN: ${{ secrets.BRIDGE_DISPATCH_TOKEN }}
+          BRIDGE_REPO: ${{ secrets.BRIDGE_REPO }}
+          BRIDGE_WORKFLOW: ${{ secrets.BRIDGE_WORKFLOW }}
+          BRIDGE_REF: ${{ secrets.BRIDGE_REF }}
         run: |
           set -euo pipefail
           set +e

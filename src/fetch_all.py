@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -200,6 +202,47 @@ def _write_bridge_keys(out_dir: Path, keys: list[str]) -> None:
     (out_dir / "_bridge_keys.txt").write_text(",".join(keys), encoding="utf-8")
 
 
+def _push_on_finish_enabled() -> bool:
+    flag = (os.environ.get("CATALOG_PUSH_ON_FINISH") or "").strip().lower()
+    if flag not in ("1", "true", "yes", "on"):
+        return False
+    return bool((os.environ.get("STAGING_PUSH_TOKEN") or "").strip())
+
+
+def _push_finished_store(key: str) -> bool:
+    """Stage + dispatch ingest for one finished shop. Serialized by caller."""
+    env = os.environ.copy()
+    env.setdefault("GITHUB_WORKSPACE", str(ROOT))
+    env["BRIDGE_STORE_KEYS"] = key
+    bash_script = ROOT / "scripts" / "push_staging.sh"
+    dispatch = ROOT / "scripts" / "dispatch_bridge.py"
+    log(f"  push-on-finish {key}")
+    stage = subprocess.run(
+        ["bash", str(bash_script)],
+        cwd=str(ROOT),
+        env=env,
+        timeout=180,
+    )
+    if stage.returncode != 0:
+        log(f"  push-on-finish staging failed {key} rc={stage.returncode}", error=True)
+        return False
+    if not (env.get("BRIDGE_DISPATCH_TOKEN") or "").strip():
+        log(f"  push-on-finish staged {key} (no bridge token)")
+        return True
+    bridge = subprocess.run(
+        [sys.executable, str(dispatch)],
+        cwd=str(ROOT),
+        env=env,
+        timeout=60,
+    )
+    if bridge.returncode != 0:
+        log(f"  push-on-finish bridge failed {key} rc={bridge.returncode}", error=True)
+        return False
+    log(f"  push-on-finish ok {key}")
+    return True
+    (out_dir / "_bridge_keys.txt").write_text(",".join(keys), encoding="utf-8")
+
+
 def _write_catalog(out_dir: Path, key: str, feed_format: str, items: list, dry_run: bool) -> None:
     envelope = build_envelope(retailer_key=key, feed_format=feed_format, items=items)
     log(f"  ok format={feed_format} items={len(items)}")
@@ -318,16 +361,29 @@ def run_slow_phase(stores: list[dict], defaults: dict, out_dir: Path, dry_run: b
     failed_keys = list(prior.get("failed_keys") or [])
     failed_rows = list(prior.get("failures") or [])
     bridge_keys: list[str] = []
+    pushed_keys: list[str] = []
     lock = threading.Lock()
+    push_on_finish = _push_on_finish_enabled() and not dry_run
 
-    log(f"phase=slow stores={len(enabled)} workers={SLOW_WORKERS}")
+    log(f"phase=slow stores={len(enabled)} workers={SLOW_WORKERS} push_on_finish={push_on_finish}")
     if not enabled:
         if not dry_run:
             _write_bridge_keys(out_dir, [])
         log("done phase=slow ok=0 failed=0")
         return 0
 
-    def worker(store: dict) -> None:
+    workers = min(SLOW_WORKERS, len(enabled))
+    push_pool = ThreadPoolExecutor(max_workers=1) if push_on_finish else None
+    push_futs: list = []
+
+    def record_push(key: str) -> bool:
+        did = _push_finished_store(key)
+        if did:
+            with lock:
+                pushed_keys.append(key)
+        return did
+
+    def fetch_one(store: dict) -> None:
         nonlocal ok, failed
         key = str(store.get("key") or "").strip()
         log(f"fetch {key} (cookie path) ...")
@@ -351,15 +407,23 @@ def run_slow_phase(stores: list[dict], defaults: dict, out_dir: Path, dry_run: b
                     }
                 )
                 log(f"  FAIL {key}: {exc}", error=True)
+        if outcome == "ok" and push_on_finish and push_pool is not None:
+            fut = push_pool.submit(record_push, key)
+            with lock:
+                push_futs.append(fut)
 
-    workers = min(SLOW_WORKERS, len(enabled))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = [pool.submit(worker, store) for store in enabled]
-        for fut in as_completed(futs):
+    with ThreadPoolExecutor(max_workers=workers) as fetch_pool:
+        fetch_futs = [fetch_pool.submit(fetch_one, store) for store in enabled]
+        for fut in as_completed(fetch_futs):
             fut.result()
+    if push_pool is not None:
+        for fut in push_futs:
+            fut.result()
+        push_pool.shutdown(wait=True)
 
+    leftover = [k for k in bridge_keys if k not in pushed_keys]
     if not dry_run:
-        _write_bridge_keys(out_dir, bridge_keys)
+        _write_bridge_keys(out_dir, leftover)
         _write_status(
             out_dir,
             ok=ok,
@@ -368,7 +432,10 @@ def run_slow_phase(stores: list[dict], defaults: dict, out_dir: Path, dry_run: b
             failed_rows=failed_rows,
             deferred_keys=[],
         )
-    log(f"done phase=slow batch_ok={len(bridge_keys)} total_ok={ok} failed={failed}")
+    log(
+        f"done phase=slow batch_ok={len(bridge_keys)} pushed={len(pushed_keys)} "
+        f"leftover={len(leftover)} total_ok={ok} failed={failed}"
+    )
     if failed and ok == 0:
         return 1
     return 0
