@@ -126,6 +126,26 @@ jobs:
           set -e
           echo "Output directory:"
           ls -la .out || true
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          out = Path(".out")
+          status_path = out / "_fetch_status.json"
+          fail_path = out / "_failures.json"
+          if fail_path.exists():
+              raise SystemExit(0)
+          failures = []
+          if status_path.exists():
+              st = json.loads(status_path.read_text(encoding="utf-8"))
+              if isinstance(st.get("failures"), list) and st["failures"]:
+                  failures = st["failures"]
+              else:
+                  for key in st.get("failed_keys") or []:
+                      failures.append({"key": key, "retailer_key": key, "error": "Catalog fetch failed", "http_status": 0})
+          if failures:
+              fail_path.write_text(json.dumps({"failures": failures}, ensure_ascii=False), encoding="utf-8")
+              print(f"wrote {fail_path} count={len(failures)}")
+          PY
           JSON_COUNT=$(find .out -maxdepth 1 -type f -name '*.json' ! -name '_fetch_status.json' ! -name '_failures.json' | wc -l | tr -d ' ')
           FAIL_REPORT=0
           if [ -f .out/_failures.json ]; then
