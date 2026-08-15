@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -70,12 +70,40 @@ def _map_product(product: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _shop_origin(base_url: str) -> str:
+    raw = (base_url or "").strip()
+    if raw and "://" not in raw:
+        raw = "https://" + raw
+    parsed = urlparse(raw)
+    if not parsed.netloc:
+        return ""
+    return f"{parsed.scheme or 'https'}://{parsed.netloc}/"
+
+
+def _browser_session():
+    """Same helper the HTML price scraper uses (not a full Chrome window)."""
+    import cloudscraper
+
+    return cloudscraper.create_scraper(
+        browser={"browser": "chrome", "platform": "windows", "mobile": False}
+    )
+
+
+def _warmup_homepage(session: requests.Session, origin: str) -> None:
+    if not origin:
+        raise RuntimeError("Missing shop origin for homepage warmup")
+    print(f"  Opening shop homepage for CDN cookies: {origin}", flush=True)
+    session.get(origin, timeout=90)
+    time.sleep(2.0)
+
+
 def _fetch_pages(
     session: requests.Session,
     *,
     endpoint: str,
     per_page: int | None,
     delay_seconds: float,
+    use_bot_user_agent: bool = True,
 ) -> list[dict[str, Any]]:
     page = 1
     items: list[dict[str, Any]] = []
@@ -85,10 +113,13 @@ def _fetch_pages(
         params: dict[str, Any] = {"page": page, "_fields": FIELDS}
         if per_page:
             params["per_page"] = int(per_page)
+        headers = {"Accept": "application/json"}
+        if use_bot_user_agent:
+            headers["User-Agent"] = USER_AGENT
         resp = session.get(
             endpoint,
             params=params,
-            headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+            headers=headers,
             timeout=90,
         )
         if resp.status_code == 429:
@@ -135,25 +166,54 @@ def fetch_woocommerce_store_api(
 ) -> list[dict[str, Any]]:
     """
     Fetch Woo Store API products.
-    Default uses per_page (fast). On HTTP 403, retries without per_page (Cloudflare-safer).
-    omit_per_page=True starts in that polite mode (WP remembered Cloudflare shops).
+    Fast path uses per_page. HTTP 403 → small pages, then homepage cookie + API retry.
+    omit_per_page=True starts in polite mode (WP remembered Cloudflare shops).
     """
     endpoint = _endpoint(base_url)
+    origin = _shop_origin(base_url)
     polite = bool(omit_per_page) or per_page in (None, 0)
+    last_exc: BaseException | None = None
+
     try:
         return _fetch_pages(
             session,
             endpoint=endpoint,
             per_page=None if polite else (int(per_page) if per_page else 50),
             delay_seconds=delay_seconds,
+            use_bot_user_agent=True,
         )
     except RuntimeError as exc:
-        if polite or "HTTP 403" not in str(exc):
+        last_exc = exc
+        if "HTTP 403" not in str(exc):
             raise
-        print("  Woo HTTP 403 with per_page; retrying polite paging (page only)", flush=True)
+        if not polite:
+            print("  Woo HTTP 403 with per_page; retrying polite paging (page only)", flush=True)
+            try:
+                return _fetch_pages(
+                    session,
+                    endpoint=endpoint,
+                    per_page=None,
+                    delay_seconds=delay_seconds,
+                    use_bot_user_agent=True,
+                )
+            except RuntimeError as polite_exc:
+                last_exc = polite_exc
+                if "HTTP 403" not in str(polite_exc):
+                    raise
+
+    print("  Woo HTTP 403; homepage first then API (cookie retry)", flush=True)
+    try:
+        browser = _browser_session()
+        _warmup_homepage(browser, origin)
         return _fetch_pages(
-            session,
+            browser,
             endpoint=endpoint,
             per_page=None,
             delay_seconds=delay_seconds,
+            use_bot_user_agent=False,
         )
+    except Exception as cookie_exc:
+        print(f"  Homepage/API cookie retry failed ({cookie_exc})", flush=True)
+        if last_exc is not None:
+            raise last_exc
+        raise
