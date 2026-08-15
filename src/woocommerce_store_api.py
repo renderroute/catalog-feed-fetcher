@@ -6,6 +6,7 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
+from . import USER_AGENT, money
 from .woo_shop_html import fetch_woocommerce_shop_html
 
 # Keep payload lean — omit bulky HTML fields from Store API responses.
