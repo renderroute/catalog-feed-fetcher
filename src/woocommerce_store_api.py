@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -13,8 +14,7 @@ FIELDS = (
     "id,name,permalink,sku,prices,images,categories,brands,"
     "is_in_stock,on_sale,gtin,global_unique_id"
 )
-# After homepage cookies: try the fast size first, then step down if Cloudflare still 403s.
-COOKIE_PAGE_SIZES = (50, 25, 10)
+# Cookie path: one probe at 50, then Woo default (~10) like the 15 Aug success. No 25/rest_route burst.
 
 
 class WooNeedsCookieRetry(RuntimeError):
@@ -103,7 +103,17 @@ def _warmup_homepage(session: requests.Session, origin: str) -> None:
         raise RuntimeError("Missing shop origin for homepage warmup")
     print(f"  Opening shop homepage for CDN cookies: {origin}", flush=True)
     session.get(origin, timeout=90)
-    time.sleep(2.0)
+    time.sleep(random.uniform(1.5, 3.0))
+
+
+def _pause_between_pages(delay_seconds: float, *, human_jitter: bool) -> None:
+    """Price scraper uses random 1.5–3.5s. Cookie crawls use 1–2s so a big shop is not a full hour."""
+    if human_jitter:
+        time.sleep(random.uniform(1.0, 2.0))
+        return
+    base = max(0.0, float(delay_seconds))
+    if base > 0:
+        time.sleep(base)
 
 
 def _fetch_pages(
@@ -114,6 +124,7 @@ def _fetch_pages(
     delay_seconds: float,
     use_bot_user_agent: bool = True,
     extra_params: dict[str, Any] | None = None,
+    human_jitter: bool = False,
 ) -> list[dict[str, Any]]:
     page = 1
     items: list[dict[str, Any]] = []
@@ -163,7 +174,7 @@ def _fetch_pages(
         elif len(products) < expected:
             break
         page += 1
-        time.sleep(max(0.0, float(delay_seconds)))
+        _pause_between_pages(delay_seconds, human_jitter=human_jitter)
 
     return items
 
@@ -180,10 +191,9 @@ def fetch_woocommerce_store_api(
     """
     Fetch Woo Store API products.
 
-    Fast path (cookie_retry=False): per_page 50. HTTP 403 raises WooNeedsCookieRetry
-    (no hour-long 10-per-page crawl).
+    Fast path (cookie_retry=False): per_page 50. HTTP 403 raises WooNeedsCookieRetry.
 
-    Cookie path: open homepage, then try 50 → 25 → 10.
+    Cookie path: homepage, try 50 once, then ~10/page (15 Aug success). Random 1–2s waits.
     """
     endpoint = _endpoint(base_url)
     origin = _shop_origin(base_url)
@@ -214,39 +224,30 @@ def fetch_woocommerce_store_api(
         print(f"  Homepage cookie warmup failed ({cookie_exc})", flush=True)
         raise
 
-    last_exc: BaseException | None = None
-    for size in COOKIE_PAGE_SIZES:
-        print(f"  Cookie path trying per_page={size}", flush=True)
-        try:
-            return _fetch_pages(
-                browser,
-                endpoint=endpoint,
-                per_page=size,
-                delay_seconds=delay_seconds,
-                use_bot_user_agent=False,
-            )
-        except RuntimeError as exc:
-            last_exc = exc
-            if "HTTP 403" not in str(exc):
-                raise
-            print(f"  per_page={size} still HTTP 403", flush=True)
-    print("  Cookie path API still 403; trying rest_route", flush=True)
-    for size in COOKIE_PAGE_SIZES:
-        print(f"  rest_route trying per_page={size}", flush=True)
-        try:
-            return _fetch_pages(
-                browser,
-                endpoint=origin_ok,
-                per_page=size,
-                delay_seconds=delay_seconds,
-                use_bot_user_agent=False,
-                extra_params={"rest_route": "/wc/store/v1/products"},
-            )
-        except RuntimeError as exc:
-            last_exc = exc
-            if "HTTP 403" not in str(exc):
-                raise
-            print(f"  rest_route per_page={size} still HTTP 403", flush=True)
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("Woo Store API HTTP 403 (likely bot/CDN block)")
+    print("  Cookie path trying per_page=50 once", flush=True)
+    try:
+        return _fetch_pages(
+            browser,
+            endpoint=endpoint,
+            per_page=50,
+            delay_seconds=delay_seconds,
+            use_bot_user_agent=False,
+            human_jitter=True,
+        )
+    except RuntimeError as exc:
+        if "HTTP 403" not in str(exc):
+            raise
+        print("  per_page=50 blocked; crawling ~10/page (15 Aug path), random 1–2s waits", flush=True)
+
+    try:
+        return _fetch_pages(
+            browser,
+            endpoint=endpoint,
+            per_page=None,
+            delay_seconds=delay_seconds,
+            use_bot_user_agent=False,
+            human_jitter=True,
+        )
+    except RuntimeError as slow_exc:
+        print(f"  Cookie path still blocked ({slow_exc})", flush=True)
+        raise
