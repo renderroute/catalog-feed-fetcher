@@ -7,7 +7,6 @@ from urllib.parse import urljoin, urlparse
 import requests
 
 from . import USER_AGENT, money
-from .woo_shop_html import fetch_woocommerce_shop_html
 
 # Keep payload lean — omit bulky HTML fields from Store API responses.
 FIELDS = (
@@ -248,14 +247,6 @@ def fetch_woocommerce_store_api(
             if "HTTP 403" not in str(exc):
                 raise
             print(f"  rest_route per_page={size} still HTTP 403", flush=True)
-    try:
-        return fetch_woocommerce_shop_html(
-            browser,
-            origin=origin_ok,
-            delay_seconds=min(1.0, float(delay_seconds) if delay_seconds else 1.0),
-        )
-    except Exception as html_exc:
-        print(f"  Shop HTML fallback failed ({html_exc})", flush=True)
-        if last_exc is not None:
-            raise last_exc
-        raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Woo Store API HTTP 403 (likely bot/CDN block)")
