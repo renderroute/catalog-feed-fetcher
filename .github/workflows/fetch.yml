@@ -245,15 +245,26 @@ jobs:
           st = {}
           if status_path.exists():
               st = json.loads(status_path.read_text(encoding="utf-8"))
-          if not fail_path.exists():
-              failures = []
-              if isinstance(st.get("failures"), list) and st["failures"]:
-                  failures = st["failures"]
-              else:
-                  for key in st.get("failed_keys") or []:
-                      failures.append({"key": key, "retailer_key": key, "error": "Catalog fetch failed", "http_status": 0})
-              if failures:
-                  fail_path.write_text(json.dumps({"failures": failures}, ensure_ascii=False), encoding="utf-8")
+          failures = []
+          if isinstance(st.get("failures"), list):
+              failures = [row for row in st["failures"] if isinstance(row, dict)]
+          if not failures:
+              for key in st.get("failed_keys") or []:
+                  failures.append(
+                      {
+                          "key": key,
+                          "retailer_key": key,
+                          "error": "Catalog fetch failed",
+                          "http_status": 0,
+                          "final": True,
+                      }
+                  )
+          for row in failures:
+              row["final"] = True
+          fail_path.write_text(
+              json.dumps({"failures": failures, "final": True}, ensure_ascii=False),
+              encoding="utf-8",
+          )
           failed = int(st.get("failed") or 0)
           ok = int(st.get("ok") or 0)
           deferred = st.get("deferred_keys") or []

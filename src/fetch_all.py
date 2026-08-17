@@ -173,6 +173,17 @@ def _queue_row(store: dict) -> dict:
     return row
 
 
+def _failure_row(key: str, exc: Exception | None = None, error: str = "") -> dict:
+    err = (error or (str(exc) if exc else "")).strip() or "Catalog fetch failed"
+    return {
+        "key": key,
+        "retailer_key": key,
+        "error": err,
+        "http_status": 403 if "403" in err else 0,
+        "final": True,
+    }
+
+
 def _write_status(out_dir: Path, *, ok: int, failed: int, failed_keys: list, failed_rows: list, deferred_keys: list) -> None:
     status_path = out_dir / "_fetch_status.json"
     status_path.write_text(
@@ -188,14 +199,12 @@ def _write_status(out_dir: Path, *, ok: int, failed: int, failed_keys: list, fai
         ),
         encoding="utf-8",
     )
+    # Always write, even when empty, so staging overwrites yesterday's leftover fails.
     fail_path = out_dir / "_failures.json"
-    if failed_rows:
-        fail_path.write_text(
-            json.dumps({"failures": failed_rows}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    elif fail_path.exists():
-        fail_path.unlink()
+    fail_path.write_text(
+        json.dumps({"failures": failed_rows, "final": True}, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def _write_bridge_keys(out_dir: Path, keys: list[str]) -> None:
@@ -315,15 +324,7 @@ def run_fast_phase(stores: list[dict], defaults: dict, out_dir: Path, dry_run: b
         else:
             failed += 1
             failed_keys.append(key)
-            err = str(exc)
-            failed_rows.append(
-                {
-                    "key": key,
-                    "retailer_key": key,
-                    "error": err,
-                    "http_status": 403 if "403" in err else 0,
-                }
-            )
+            failed_rows.append(_failure_row(key, exc))
             log(f"  FAIL {key}: {exc}", error=True)
 
     deferred_keys = [str(s["key"]) for s in deferred]
@@ -397,15 +398,7 @@ def run_slow_phase(stores: list[dict], defaults: dict, out_dir: Path, dry_run: b
             else:
                 failed += 1
                 failed_keys.append(key)
-                err = str(exc)
-                failed_rows.append(
-                    {
-                        "key": key,
-                        "retailer_key": key,
-                        "error": err,
-                        "http_status": 403 if exc and "403" in err else 0,
-                    }
-                )
+                failed_rows.append(_failure_row(key, exc))
                 log(f"  FAIL {key}: {exc}", error=True)
         if outcome == "ok" and push_on_finish and push_pool is not None:
             fut = push_pool.submit(record_push, key)
@@ -422,6 +415,10 @@ def run_slow_phase(stores: list[dict], defaults: dict, out_dir: Path, dry_run: b
         push_pool.shutdown(wait=True)
 
     leftover = [k for k in bridge_keys if k not in pushed_keys]
+    succeeded = set(bridge_keys) | set(pushed_keys)
+    failed_rows = [row for row in failed_rows if str(row.get("key") or "") not in succeeded]
+    failed_keys = [k for k in failed_keys if k not in succeeded]
+    failed = len(failed_rows)
     if not dry_run:
         _write_bridge_keys(out_dir, leftover)
         _write_status(
