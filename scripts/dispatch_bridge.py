@@ -9,6 +9,10 @@ import urllib.error
 import urllib.request
 
 
+def _truthy(value: str) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def main() -> int:
     if not (os.environ.get("BRIDGE_DISPATCH_TOKEN") or "").strip() or not (os.environ.get("BRIDGE_REPO") or "").strip():
         print("Skipping bridge dispatch (BRIDGE_DISPATCH_TOKEN / BRIDGE_REPO not set).")
@@ -20,6 +24,9 @@ def main() -> int:
     ref = (os.environ.get("BRIDGE_REF") or "main").strip() or "main"
     token = (os.environ.get("BRIDGE_DISPATCH_TOKEN") or "").strip()
     store = (os.environ.get("BRIDGE_STORE_KEYS") or "").strip()
+    failures_only = _truthy(os.environ.get("BRIDGE_FAILURES_ONLY") or "")
+    if failures_only and not store:
+        store = "__failures_only__"
 
     body = json.dumps(
         {
@@ -28,6 +35,7 @@ def main() -> int:
                 "store": store,
                 "mode": "apply",
                 "local_validate_only": "false",
+                "failures_only": "true" if failures_only else "false",
             },
         }
     ).encode("utf-8")
@@ -48,7 +56,7 @@ def main() -> int:
         with urllib.request.urlopen(req) as resp:
             print(
                 f"bridge dispatch ok HTTP {resp.status} repo={repo} workflow={workflow} "
-                f"store={store or '(all latest)'}"
+                f"store={store or '(all latest)'} failures_only={failures_only}"
             )
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]

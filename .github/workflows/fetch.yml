@@ -133,13 +133,17 @@ jobs:
           ok = int(st.get("ok") or 0)
           failed = int(st.get("failed") or 0)
           deferred = st.get("deferred_keys") or []
-          print(f"fast status ok={ok} deferred={len(deferred)} failed={failed}")
+          fails = st.get("failures") or []
+          has = failed > 0 or (isinstance(fails, list) and len(fails) > 0)
+          print(f"fast status ok={ok} deferred={len(deferred)} failed={failed} has_failures={has}")
           Path("/tmp/slow-count").write_text(str(len(deferred)), encoding="utf-8")
+          Path("/tmp/has-failures-fast").write_text("true" if has else "false", encoding="utf-8")
           keys = Path(".out/_bridge_keys.txt")
           print(f"fast bridge keys: {(keys.read_text(encoding='utf-8') if keys.exists() else '')}")
           PY
           echo "slow_count=$(cat /tmp/slow-count)" >> "$GITHUB_OUTPUT"
           echo "bridge_keys=$(cat .out/_bridge_keys.txt 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+          echo "has_failures=$(cat /tmp/has-failures-fast)" >> "$GITHUB_OUTPUT"
 
       - name: Push fast catalogs to staging
         id: staging_fast
@@ -158,6 +162,16 @@ jobs:
           BRIDGE_WORKFLOW: ${{ secrets.BRIDGE_WORKFLOW }}
           BRIDGE_REF: ${{ secrets.BRIDGE_REF }}
           BRIDGE_STORE_KEYS: ${{ steps.fetch_fast.outputs.bridge_keys }}
+        run: python scripts/dispatch_bridge.py
+
+      - name: Report fast fetch failures to site
+        if: steps.staging_fast.outputs.pushed == 'true' && steps.fetch_fast.outputs.has_failures == 'true' && steps.fetch_fast.outputs.bridge_keys == ''
+        env:
+          BRIDGE_DISPATCH_TOKEN: ${{ secrets.BRIDGE_DISPATCH_TOKEN }}
+          BRIDGE_REPO: ${{ secrets.BRIDGE_REPO }}
+          BRIDGE_WORKFLOW: ${{ secrets.BRIDGE_WORKFLOW }}
+          BRIDGE_REF: ${{ secrets.BRIDGE_REF }}
+          BRIDGE_FAILURES_ONLY: '1'
         run: python scripts/dispatch_bridge.py
 
       - name: Fetch slow catalogs (cookie path, 2 at a time)
@@ -188,8 +202,14 @@ jobs:
           print(f"slow status ok={st.get('ok')} failed={st.get('failed')}")
           keys = Path(".out/_bridge_keys.txt")
           print(f"slow bridge keys: {(keys.read_text(encoding='utf-8') if keys.exists() else '')}")
+          failed = int(st.get("failed") or 0)
+          fails = st.get("failures") or []
+          has = failed > 0 or (isinstance(fails, list) and len(fails) > 0)
+          Path("/tmp/has-failures-slow").write_text("true" if has else "false", encoding="utf-8")
+          print(f"has_failures={has}")
           PY
           echo "bridge_keys=$(cat .out/_bridge_keys.txt 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+          echo "has_failures=$(cat /tmp/has-failures-slow)" >> "$GITHUB_OUTPUT"
 
       - name: Push slow catalogs to staging
         id: staging_slow
@@ -208,6 +228,16 @@ jobs:
           BRIDGE_WORKFLOW: ${{ secrets.BRIDGE_WORKFLOW }}
           BRIDGE_REF: ${{ secrets.BRIDGE_REF }}
           BRIDGE_STORE_KEYS: ${{ steps.fetch_slow.outputs.bridge_keys }}
+        run: python scripts/dispatch_bridge.py
+
+      - name: Report slow fetch failures to site
+        if: steps.staging_slow.outputs.pushed == 'true' && steps.fetch_slow.outputs.has_failures == 'true'
+        env:
+          BRIDGE_DISPATCH_TOKEN: ${{ secrets.BRIDGE_DISPATCH_TOKEN }}
+          BRIDGE_REPO: ${{ secrets.BRIDGE_REPO }}
+          BRIDGE_WORKFLOW: ${{ secrets.BRIDGE_WORKFLOW }}
+          BRIDGE_REF: ${{ secrets.BRIDGE_REF }}
+          BRIDGE_FAILURES_ONLY: '1'
         run: python scripts/dispatch_bridge.py
 
       # upload-artifact respects .gitignore; .out/ is ignored, so copy first.
