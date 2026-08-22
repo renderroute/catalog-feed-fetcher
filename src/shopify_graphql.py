@@ -8,6 +8,8 @@ import requests
 
 from . import USER_AGENT, compose_title, money
 
+SHOPIFY_STOREFRONT_API_VERSION = "2025-10"
+
 PRODUCTS_QUERY = """
 query CatalogProducts($first: Int!, $after: String) {
   products(first: $first, after: $after) {
@@ -73,7 +75,7 @@ def fetch_shopify_graphql(
     session: requests.Session,
     *,
     base_url: str,
-    version: str = "2024-07",
+    version: str = SHOPIFY_STOREFRONT_API_VERSION,
     page_size: int = 100,
     delay_seconds: float = 2.0,
 ) -> list[dict[str, Any]]:

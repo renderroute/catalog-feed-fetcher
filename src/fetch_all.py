@@ -13,7 +13,7 @@ import requests
 import yaml
 
 from . import build_envelope
-from .shopify_graphql import fetch_shopify_graphql
+from .shopify_graphql import SHOPIFY_STOREFRONT_API_VERSION, fetch_shopify_graphql
 from .shopify_products_json import fetch_shopify_products_json
 from .woocommerce_store_api import WooNeedsCookieRetry, fetch_woocommerce_store_api
 
@@ -71,7 +71,7 @@ def fetch_store(
         version = str(
             store.get("shopify_graphql_version")
             or defaults.get("shopify_graphql_version")
-            or "2024-07"
+            or SHOPIFY_STOREFRONT_API_VERSION
         )
         page_size = int(_num(store.get("shopify_page_size"), defaults.get("shopify_page_size", 100)) or 100)
         try:
@@ -157,6 +157,8 @@ def stores_from_json(path: Path) -> list[dict]:
         }
         if row.get("delay_seconds") is not None and row.get("delay_seconds") != "":
             row_out["delay_seconds"] = row.get("delay_seconds")
+        if row.get("shopify_graphql_version") is not None and str(row.get("shopify_graphql_version")).strip() != "":
+            row_out["shopify_graphql_version"] = str(row.get("shopify_graphql_version")).strip()
         out.append(row_out)
     return out
 
@@ -170,6 +172,8 @@ def _queue_row(store: dict) -> dict:
     }
     if store.get("delay_seconds") is not None and store.get("delay_seconds") != "":
         row["delay_seconds"] = store.get("delay_seconds")
+    if store.get("shopify_graphql_version") is not None and str(store.get("shopify_graphql_version")).strip() != "":
+        row["shopify_graphql_version"] = str(store.get("shopify_graphql_version")).strip()
     return row
 
 
