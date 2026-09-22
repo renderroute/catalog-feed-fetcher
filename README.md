@@ -1,7 +1,8 @@
 # catalog-feed-fetcher
 
-Generic scheduled / dispatched fetcher for **public** storefront catalog JSON
-(Shopify Storefront GraphQL, Shopify `products.json`, WooCommerce Store API).
+Generic scheduled / dispatched fetcher for **public** storefront catalogs
+(Shopify Storefront GraphQL, Shopify `products.json`, WooCommerce Store API,
+and Google Shopping / Merchant Center XML).
 
 This repository is intentionally **anonymous**. It does not document, name, or
 call any downstream commercial website.
@@ -33,6 +34,10 @@ pip install -r requirements.txt
 # Dynamic single store (production-style)
 python -m src.fetch_all --out-dir .out \
   --inline-store example --base-url https://example.com --platform shopify
+
+# Google Shopping XML (full feed URL required)
+python -m src.fetch_all --out-dir .out \
+  --inline-store examplexml --base-url https://example.com/feed.xml --platform google_xml
 
 # Legacy stores.yml
 python -m src.fetch_all --store elitehubs

@@ -16,7 +16,7 @@ on:
         required: false
         default: ''
       platform:
-        description: 'shopify | shopify_products_json | woocommerce'
+        description: 'shopify | shopify_products_json | woocommerce | google_xml'
         required: false
         default: ''
       stores_json:

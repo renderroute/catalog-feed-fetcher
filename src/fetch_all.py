@@ -13,6 +13,7 @@ import requests
 import yaml
 
 from . import build_envelope
+from .google_xml import fetch_google_xml
 from .shopify_graphql import SHOPIFY_STOREFRONT_API_VERSION, fetch_shopify_graphql
 from .shopify_products_json import fetch_shopify_products_json
 from .woocommerce_store_api import WooNeedsCookieRetry, fetch_woocommerce_store_api
@@ -41,6 +42,9 @@ def normalize_platform(platform: str) -> str:
         "products_json": "shopify_products_json",
         "woocommerce_store_api": "woocommerce",
         "woo": "woocommerce",
+        "google_xml": "google_xml",
+        "google_shopping_xml": "google_xml",
+        "google_merchant_xml": "google_xml",
     }
     return aliases.get(platform, platform)
 
@@ -114,6 +118,12 @@ def fetch_store(
             cookie_retry=cookie_retry,
         )
         return "woocommerce_store_api", items
+
+    if platform == "google_xml":
+        # One-shot Merchant Center / Google Shopping XML download.
+        # base_url must be the full feed URL (not only the shop origin).
+        items = fetch_google_xml(session, base_url=base_url)
+        return "google_xml", items
 
     raise ValueError(f"Unsupported platform: {platform}")
 
