@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import random
 import time
 from typing import Any
@@ -7,9 +8,9 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
-from . import USER_AGENT, money
+from . import USER_AGENT, block_source, money
 
-# Keep payload lean — omit bulky HTML fields from Store API responses.
+# Keep payload lean: omit bulky HTML fields from Store API responses.
 FIELDS = (
     "id,name,permalink,sku,prices,images,categories,brands,"
     "is_in_stock,on_sale,gtin,global_unique_id"
@@ -18,7 +19,7 @@ FIELDS = (
 
 
 class WooNeedsCookieRetry(RuntimeError):
-    """Fast path hit HTTP 403 — caller should queue the shop for homepage-cookie fetch."""
+    """Fast path hit HTTP 403; caller should queue the shop for homepage-cookie fetch."""
 
     def __init__(self) -> None:
         super().__init__("Woo Store API HTTP 403 (likely bot/CDN block)")
@@ -116,6 +117,27 @@ def _pause_between_pages(delay_seconds: float, *, human_jitter: bool) -> None:
         time.sleep(base)
 
 
+def _decode_products(resp: requests.Response, page: int) -> Any:
+    """Some shop themes (e.g. Elementor) print a <style> block before the JSON on certain pages."""
+    try:
+        return resp.json()
+    except ValueError:
+        pass
+    text = resp.text or ""
+    start = text.find("[{")
+    if start < 0:
+        start = text.find("[]")
+    if start > 0:
+        try:
+            decoded = json.loads(text[start:])
+        except ValueError:
+            decoded = None
+        if isinstance(decoded, list):
+            print(f"  page {page}: skipped {start} bytes of non-JSON before the product list", flush=True)
+            return decoded
+    raise RuntimeError(f"Woo Store API returned invalid JSON on page {page} ({len(text)} bytes)")
+
+
 def _fetch_pages(
     session: requests.Session,
     *,
@@ -149,9 +171,9 @@ def _fetch_pages(
             retry_after = int(resp.headers.get("Retry-After") or "60")
             raise RuntimeError(f"Woo Store API HTTP 429 (retry_after={retry_after})")
         if resp.status_code == 403:
-            raise RuntimeError("Woo Store API HTTP 403 (likely bot/CDN block)")
+            raise RuntimeError(f"Woo Store API HTTP 403 (blocked by {block_source(resp)})")
         resp.raise_for_status()
-        products = resp.json()
+        products = _decode_products(resp, page)
         if not isinstance(products, list):
             raise RuntimeError("Unexpected Woo Store API shape")
         if page == 1 and len(products) == 0:

@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from . import USER_AGENT, money
+from . import USER_AGENT, block_source, money
 
 # Common Google Merchant / WooCommerce GPF namespaces.
 _NS_CANDIDATES = (
@@ -131,7 +131,7 @@ def fetch_google_xml(
     }
     response = session.get(url, headers=headers, timeout=timeout, stream=True)
     if response.status_code == 403:
-        raise RuntimeError("Google XML feed HTTP 403 (likely bot/CDN block)")
+        raise RuntimeError(f"Google XML feed HTTP 403 (blocked by {block_source(response)})")
     if response.status_code != 200:
         raise RuntimeError(f"Google XML feed HTTP {response.status_code}")
 

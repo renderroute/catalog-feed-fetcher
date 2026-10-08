@@ -106,6 +106,8 @@ jobs:
 
       - name: Fetch fast catalogs
         id: fetch_fast
+        env:
+          CATALOG_FETCHER_USER_AGENT: ${{ secrets.CATALOG_FETCHER_USER_AGENT }}
         run: |
           set -euo pipefail
           MODE="${{ steps.prep.outputs.mode }}"
@@ -178,6 +180,7 @@ jobs:
         id: fetch_slow
         if: steps.fetch_fast.outcome == 'success' && steps.fetch_fast.outputs.slow_count != '0'
         env:
+          CATALOG_FETCHER_USER_AGENT: ${{ secrets.CATALOG_FETCHER_USER_AGENT }}
           CATALOG_PUSH_ON_FINISH: '1'
           STAGING_PUSH_TOKEN: ${{ secrets.STAGING_PUSH_TOKEN }}
           STAGING_REPO: ${{ secrets.STAGING_REPO }}
