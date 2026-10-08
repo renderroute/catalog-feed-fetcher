@@ -108,13 +108,13 @@ def _warmup_homepage(session: requests.Session, origin: str) -> None:
 
 
 def _pause_between_pages(delay_seconds: float, *, human_jitter: bool) -> None:
-    """Price scraper uses random 1.5–3.5s. Cookie crawls use 1–2s so a big shop is not a full hour."""
+    """Cookie crawls use 1-2s so a big shop is not a full hour. Normal path: random delay to delay+1s, no fixed rhythm."""
     if human_jitter:
         time.sleep(random.uniform(1.0, 2.0))
         return
     base = max(0.0, float(delay_seconds))
     if base > 0:
-        time.sleep(base)
+        time.sleep(random.uniform(base, base + 1.0))
 
 
 def _decode_products(resp: requests.Response, page: int) -> Any:
@@ -147,6 +147,7 @@ def _fetch_pages(
     use_bot_user_agent: bool = True,
     extra_params: dict[str, Any] | None = None,
     human_jitter: bool = False,
+    user_agent: str = USER_AGENT,
 ) -> list[dict[str, Any]]:
     page = 1
     items: list[dict[str, Any]] = []
@@ -160,7 +161,7 @@ def _fetch_pages(
             params["per_page"] = int(per_page)
         headers = {"Accept": "application/json"}
         if use_bot_user_agent:
-            headers["User-Agent"] = USER_AGENT
+            headers["User-Agent"] = user_agent
         resp = session.get(
             endpoint,
             params=params,
@@ -209,6 +210,7 @@ def fetch_woocommerce_store_api(
     delay_seconds: float = 2.0,
     omit_per_page: bool = False,
     cookie_retry: bool = False,
+    user_agent: str = USER_AGENT,
 ) -> list[dict[str, Any]]:
     """
     Fetch Woo Store API products.
@@ -231,6 +233,7 @@ def fetch_woocommerce_store_api(
                 per_page=page_size,
                 delay_seconds=delay_seconds,
                 use_bot_user_agent=True,
+                user_agent=user_agent,
             )
         except RuntimeError as exc:
             if "HTTP 403" not in str(exc):

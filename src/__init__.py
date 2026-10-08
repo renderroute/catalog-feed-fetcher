@@ -7,8 +7,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 SCHEMA_VERSION = "pcpmf_public_catalog_v1"
-# Public repo stays anonymous: a named crawler UA (if any) comes from a repo secret, never from code.
-USER_AGENT = (os.environ.get("CATALOG_FETCHER_USER_AGENT") or "").strip() or "CatalogFeedFetcher/0.1"
+USER_AGENT = "CatalogFeedFetcher/0.1"
+# Public repo stays anonymous: the named crawler UA comes from a repo secret, never from code,
+# and is only sent to stores the caller marks with identify=true (shops that know us).
+NAMED_USER_AGENT = (os.environ.get("CATALOG_FETCHER_USER_AGENT") or "").strip()
+
+
+def user_agent_for(store: dict) -> str:
+    if NAMED_USER_AGENT and bool(store.get("identify")):
+        return NAMED_USER_AGENT
+    return USER_AGENT
 
 
 def block_source(resp: Any) -> str:

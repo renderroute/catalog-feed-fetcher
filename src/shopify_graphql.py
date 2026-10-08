@@ -78,6 +78,7 @@ def fetch_shopify_graphql(
     version: str = SHOPIFY_STOREFRONT_API_VERSION,
     page_size: int = 100,
     delay_seconds: float = 2.0,
+    user_agent: str = USER_AGENT,
 ) -> list[dict[str, Any]]:
     endpoint = graphql_endpoint(base_url, version)
     product_base = base_url.rstrip("/") + "/products/"
@@ -95,7 +96,7 @@ def fetch_shopify_graphql(
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": USER_AGENT,
+                "User-Agent": user_agent,
             },
             timeout=90,
         )

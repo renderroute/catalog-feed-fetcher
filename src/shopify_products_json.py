@@ -15,6 +15,7 @@ def fetch_shopify_products_json(
     base_url: str,
     page_size: int = 100,
     delay_seconds: float = 2.0,
+    user_agent: str = USER_AGENT,
 ) -> list[dict[str, Any]]:
     # Prefer collections/all; also try /products.json if needed by caller.
     endpoint = urljoin(base_url.rstrip("/") + "/", "collections/all/products.json")
@@ -26,7 +27,7 @@ def fetch_shopify_products_json(
         resp = session.get(
             endpoint,
             params={"limit": int(page_size), "page": page},
-            headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+            headers={"Accept": "application/json", "User-Agent": user_agent},
             timeout=90,
         )
         if resp.status_code == 429:

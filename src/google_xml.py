@@ -118,6 +118,7 @@ def fetch_google_xml(
     *,
     base_url: str,
     timeout: int = 300,
+    user_agent: str = USER_AGENT,
 ) -> list[dict[str, Any]]:
     """
     Download one Google Merchant XML file and return lean catalog items.
@@ -126,7 +127,7 @@ def fetch_google_xml(
     """
     url = _feed_url(base_url)
     headers = {
-        "User-Agent": USER_AGENT,
+        "User-Agent": user_agent,
         "Accept": "application/xml,text/xml,*/*;q=0.8",
     }
     response = session.get(url, headers=headers, timeout=timeout, stream=True)

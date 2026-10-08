@@ -12,8 +12,9 @@ from pathlib import Path
 import requests
 import yaml
 
-from . import build_envelope
+from . import build_envelope, user_agent_for
 from .google_xml import fetch_google_xml
+from .spacing import Spacer, order_stores
 from .shopify_graphql import SHOPIFY_STOREFRONT_API_VERSION, fetch_shopify_graphql
 from .shopify_products_json import fetch_shopify_products_json
 from .woocommerce_store_api import WooNeedsCookieRetry, fetch_woocommerce_store_api
@@ -68,6 +69,7 @@ def fetch_store(
     platform = normalize_platform(str(store.get("platform") or ""))
     base_url = (store.get("base_url") or "").strip()
     delay = float(_num(store.get("delay_seconds"), defaults.get("delay_seconds", 2.0)) or 2.0)
+    user_agent = user_agent_for(store)
     if not base_url:
         raise ValueError("base_url required")
 
@@ -85,6 +87,7 @@ def fetch_store(
                 version=version,
                 page_size=page_size,
                 delay_seconds=delay,
+                user_agent=user_agent,
             )
             return "shopify_storefront_graphql", items
         except Exception as exc:
@@ -94,6 +97,7 @@ def fetch_store(
                 base_url=base_url,
                 page_size=min(page_size, 100),
                 delay_seconds=max(delay, 2.0),
+                user_agent=user_agent,
             )
             return "shopify_products_json", items
 
@@ -104,6 +108,7 @@ def fetch_store(
             base_url=base_url,
             page_size=min(page_size, 100),
             delay_seconds=max(delay, 2.0),
+            user_agent=user_agent,
         )
         return "shopify_products_json", items
 
@@ -116,13 +121,14 @@ def fetch_store(
             delay_seconds=delay,
             omit_per_page=False,
             cookie_retry=cookie_retry,
+            user_agent=user_agent,
         )
         return "woocommerce_store_api", items
 
     if platform == "google_xml":
         # One-shot Merchant Center / Google Shopping XML download.
         # base_url must be the full feed URL (not only the shop origin).
-        items = fetch_google_xml(session, base_url=base_url)
+        items = fetch_google_xml(session, base_url=base_url, user_agent=user_agent)
         return "google_xml", items
 
     raise ValueError(f"Unsupported platform: {platform}")
@@ -169,6 +175,8 @@ def stores_from_json(path: Path) -> list[dict]:
             row_out["delay_seconds"] = row.get("delay_seconds")
         if row.get("shopify_graphql_version") is not None and str(row.get("shopify_graphql_version")).strip() != "":
             row_out["shopify_graphql_version"] = str(row.get("shopify_graphql_version")).strip()
+        if row.get("identify"):
+            row_out["identify"] = True
         out.append(row_out)
     return out
 
@@ -184,6 +192,8 @@ def _queue_row(store: dict) -> dict:
         row["delay_seconds"] = store.get("delay_seconds")
     if store.get("shopify_graphql_version") is not None and str(store.get("shopify_graphql_version")).strip() != "":
         row["shopify_graphql_version"] = str(store.get("shopify_graphql_version")).strip()
+    if store.get("identify"):
+        row["identify"] = True
     return row
 
 
@@ -323,12 +333,15 @@ def run_fast_phase(stores: list[dict], defaults: dict, out_dir: Path, dry_run: b
     bridge_keys: list[str] = []
 
     log(f"phase=fast stores={len(enabled)}")
-    for store in enabled:
+    spacer = Spacer()
+    for store, group in order_stores(enabled):
         key = str(store.get("key") or "").strip()
-        log(f"fetch {key} ...")
+        waited = spacer.wait_before(group)
+        log(f"fetch {key} ... (group={group}, waited {waited:.0f}s)")
         _key, outcome, exc = _run_one_store(
             store, defaults, cookie_retry=False, out_dir=out_dir, dry_run=dry_run
         )
+        spacer.mark_used(group)
         if outcome == "ok":
             ok += 1
             bridge_keys.append(key)
@@ -398,13 +411,19 @@ def run_slow_phase(stores: list[dict], defaults: dict, out_dir: Path, dry_run: b
                 pushed_keys.append(key)
         return did
 
-    def fetch_one(store: dict) -> None:
+    spacer = Spacer()
+
+    def fetch_one(store: dict, group: str) -> None:
         nonlocal ok, failed
         key = str(store.get("key") or "").strip()
-        log(f"fetch {key} (cookie path) ...")
-        _key, outcome, exc = _run_one_store(
-            store, defaults, cookie_retry=True, out_dir=out_dir, dry_run=dry_run
-        )
+        # Never two shops from the same host group at once.
+        with spacer.group_lock(group):
+            waited = spacer.wait_before(group)
+            log(f"fetch {key} (cookie path) ... (group={group}, waited {waited:.0f}s)")
+            _key, outcome, exc = _run_one_store(
+                store, defaults, cookie_retry=True, out_dir=out_dir, dry_run=dry_run
+            )
+            spacer.mark_used(group)
         with lock:
             if outcome == "ok":
                 ok += 1
@@ -420,7 +439,7 @@ def run_slow_phase(stores: list[dict], defaults: dict, out_dir: Path, dry_run: b
                 push_futs.append(fut)
 
     with ThreadPoolExecutor(max_workers=workers) as fetch_pool:
-        fetch_futs = [fetch_pool.submit(fetch_one, store) for store in enabled]
+        fetch_futs = [fetch_pool.submit(fetch_one, store, group) for store, group in order_stores(enabled)]
         for fut in as_completed(fetch_futs):
             fut.result()
     if push_pool is not None:
