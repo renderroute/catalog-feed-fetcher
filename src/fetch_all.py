@@ -14,6 +14,7 @@ import yaml
 
 from . import build_envelope, user_agent_for
 from .google_xml import fetch_google_xml
+from .robots import check_store
 from .spacing import Spacer, order_stores
 from .shopify_graphql import SHOPIFY_STOREFRONT_API_VERSION, fetch_shopify_graphql
 from .shopify_products_json import fetch_shopify_products_json
@@ -72,6 +73,7 @@ def fetch_store(
     user_agent = user_agent_for(store)
     if not base_url:
         raise ValueError("base_url required")
+    robots = check_store(session, {**store, "platform": platform, "base_url": base_url})
 
     if platform == "shopify":
         version = str(
@@ -91,6 +93,8 @@ def fetch_store(
             )
             return "shopify_storefront_graphql", items
         except Exception as exc:
+            if not robots["products_json_ok"]:
+                raise
             log(f"  GraphQL failed ({exc}); falling back to products.json", error=True)
             items = fetch_shopify_products_json(
                 session,
