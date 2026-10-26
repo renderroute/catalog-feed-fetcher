@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import requests
 
-from . import USER_AGENT, block_source, money
+from . import USER_AGENT, block_source, compose_title, money
 
 # Keep payload lean: omit bulky HTML fields from Store API responses.
+# type / parent / variation: variable products are swapped for their variations (one row each).
 FIELDS = (
     "id,name,permalink,sku,prices,images,categories,brands,"
-    "is_in_stock,on_sale,gtin,global_unique_id"
+    "is_in_stock,on_sale,gtin,global_unique_id,type,parent,variation"
 )
+# "Switch: Akko Fairy, Keycaps: Blue Gradient" -> split only where the next "Name: " starts.
+_VARIATION_SPLIT = re.compile(r",\s*(?=[^,:]+:\s)")
 # Cookie path: one probe at 50, then Woo default (~10) like the 15 Aug success. No 25/rest_route burst.
 
 
@@ -32,7 +36,19 @@ def _endpoint(base_url: str) -> str:
     return urljoin(base + "/", "wp-json/wc/store/v1/products")
 
 
-def _map_product(product: dict[str, Any]) -> dict[str, Any] | None:
+def _variation_label(product: dict[str, Any]) -> str:
+    """Option values only, Shopify style: "Akko Fairy / Blue Gradient"."""
+    values = []
+    for part in _VARIATION_SPLIT.split(str(product.get("variation") or "")):
+        value = part.split(":", 1)[1] if ":" in part else part
+        value = value.strip()
+        if value:
+            values.append(value)
+    return " / ".join(values)
+
+
+def _map_product(product: dict[str, Any], parent: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """parent: the variable product a variation belongs to (fills brand / image the variation lacks)."""
     product_id = str(product.get("id") or "").strip()
     if not product_id:
         return None
@@ -54,18 +70,21 @@ def _map_product(product: dict[str, Any]) -> dict[str, Any] | None:
     if sale_price is not None and price is not None and sale_price >= price:
         sale_price = None
     image_url = ""
-    images = product.get("images") or []
+    images = product.get("images") or (parent or {}).get("images") or []
     if images and isinstance(images[0], dict):
         image_url = str(images[0].get("src") or "")
     brand = ""
-    brands = product.get("brands") or []
+    brands = product.get("brands") or (parent or {}).get("brands") or []
     if brands and isinstance(brands[0], dict):
         brand = str(brands[0].get("name") or "")
     in_stock = bool(product.get("is_in_stock"))
     gtin = str(product.get("gtin") or product.get("global_unique_id") or "").strip()
+    title = str(product.get("name") or (parent or {}).get("name") or "").strip()
+    if str(product.get("type") or "") == "variation":
+        title = compose_title(title, _variation_label(product))
     return {
         "merchant_item_id": product_id,
-        "title": str(product.get("name") or "").strip(),
+        "title": title,
         "product_url": str(product.get("permalink") or "").strip(),
         "image_url": image_url,
         "product_type": "",
@@ -180,11 +199,7 @@ def _fetch_pages(
         if page == 1 and len(products) == 0:
             break
 
-        for product in products:
-            if isinstance(product, dict):
-                mapped = _map_product(product)
-                if mapped:
-                    items.append(mapped)
+        items.extend(p for p in products if isinstance(p, dict))
 
         total_pages = 0
         try:
@@ -199,6 +214,55 @@ def _fetch_pages(
         page += 1
         _pause_between_pages(delay_seconds, human_jitter=human_jitter)
 
+    return items
+
+
+def _fetch_catalog(session: requests.Session, **page_args: Any) -> list[dict[str, Any]]:
+    """
+    Products, then variations (`type=variation`, not in the normal list).
+
+    A variable product (e.g. one keyboard with 18 switch / keycap options) is replaced by
+    one row per variation with its own price, SKU, stock and link. Kept as one row only
+    when the shop returns no variations for it.
+    """
+    products = _fetch_pages(session, **page_args)
+    parents = {
+        str(p.get("id")): p for p in products if str(p.get("type") or "") == "variable"
+    }
+    variations: list[dict[str, Any]] = []
+    if parents:
+        _pause_between_pages(page_args.get("delay_seconds", 2.0), human_jitter=bool(page_args.get("human_jitter")))
+        try:
+            variations = _fetch_pages(
+                session, **{**page_args, "extra_params": {"type": "variation"}}
+            )
+        except requests.HTTPError as exc:
+            # Very old Woo without the type filter: keep one row per product as before.
+            if exc.response is None or exc.response.status_code != 400:
+                raise
+            print("  Woo variations not available (HTTP 400); keeping one row per product", flush=True)
+
+    covered: set[str] = set()
+    items: list[dict[str, Any]] = []
+    for variation in variations:
+        parent_id = str(variation.get("parent") or "")
+        if parent_id not in parents:
+            continue  # parent hidden from the product list
+        mapped = _map_product(variation, parents[parent_id])
+        if mapped:
+            items.append(mapped)
+            covered.add(parent_id)
+    for product in products:
+        if str(product.get("id")) in covered:
+            continue
+        mapped = _map_product(product)
+        if mapped:
+            items.append(mapped)
+    if variations:
+        print(
+            f"  {len(variations)} variations replace {len(covered)} of {len(parents)} variable products",
+            flush=True,
+        )
     return items
 
 
@@ -227,7 +291,7 @@ def fetch_woocommerce_store_api(
 
     if not cookie_retry:
         try:
-            return _fetch_pages(
+            return _fetch_catalog(
                 session,
                 endpoint=endpoint,
                 per_page=page_size,
@@ -251,7 +315,7 @@ def fetch_woocommerce_store_api(
 
     print("  Cookie path trying per_page=50 once", flush=True)
     try:
-        return _fetch_pages(
+        return _fetch_catalog(
             browser,
             endpoint=endpoint,
             per_page=50,
@@ -265,7 +329,7 @@ def fetch_woocommerce_store_api(
         print("  per_page=50 blocked; crawling ~10/page (15 Aug path), random 1–2s waits", flush=True)
 
     try:
-        return _fetch_pages(
+        return _fetch_catalog(
             browser,
             endpoint=endpoint,
             per_page=None,
