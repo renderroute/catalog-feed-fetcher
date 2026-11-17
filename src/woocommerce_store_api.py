@@ -122,7 +122,10 @@ def _warmup_homepage(session: requests.Session, origin: str) -> None:
     if not origin:
         raise RuntimeError("Missing shop origin for homepage warmup")
     print(f"  Opening shop homepage for CDN cookies: {origin}", flush=True)
-    session.get(origin, timeout=90)
+    resp = session.get(origin, timeout=90)
+    # Log only (no raise): shows whether the block is site-wide or just the Store API.
+    who = f" (blocked by {block_source(resp)})" if resp.status_code == 403 else ""
+    print(f"  homepage HTTP {resp.status_code}{who}", flush=True)
     time.sleep(random.uniform(1.5, 3.0))
 
 
