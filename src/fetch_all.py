@@ -14,6 +14,7 @@ import yaml
 
 from . import build_envelope, user_agent_for
 from .google_xml import fetch_google_xml
+from .relay import is_relayed, mount_relay
 from .robots import check_store
 from .spacing import Spacer, order_stores
 from .shopify_graphql import SHOPIFY_STOREFRONT_API_VERSION, fetch_shopify_graphql
@@ -300,11 +301,18 @@ def _run_one_store(
     """Return (key, outcome, error) where outcome is ok|defer|fail."""
     key = str(store.get("key") or "").strip()
     session = requests.Session()
+    relayed = mount_relay(session) and is_relayed(str(store.get("base_url") or ""))
+    if relayed:
+        log("  via fetch relay (shop blocks GitHub addresses)")
     try:
         feed_format, items = fetch_store(session, store, defaults, cookie_retry=cookie_retry)
         _write_catalog(out_dir, key, feed_format, items, dry_run)
         return key, "ok", None
     except WooNeedsCookieRetry as exc:
+        if relayed:
+            # The relay already is the fix for this shop; the cookie path would go direct and hit the same block.
+            cause = str(exc.__cause__ or exc)
+            return key, "fail", RuntimeError(f"{cause} via fetch relay")
         if cookie_retry:
             return key, "fail", exc
         return key, "defer", exc

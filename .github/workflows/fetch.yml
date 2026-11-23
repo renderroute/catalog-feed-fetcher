@@ -108,6 +108,9 @@ jobs:
         id: fetch_fast
         env:
           CATALOG_FETCHER_USER_AGENT: ${{ secrets.CATALOG_FETCHER_USER_AGENT }}
+          FETCH_RELAY_URL: ${{ secrets.FETCH_RELAY_URL }}
+          FETCH_RELAY_KEY: ${{ secrets.FETCH_RELAY_KEY }}
+          FETCH_RELAY_HOSTS: ${{ secrets.FETCH_RELAY_HOSTS }}
         run: |
           set -euo pipefail
           MODE="${{ steps.prep.outputs.mode }}"
@@ -181,6 +184,9 @@ jobs:
         if: steps.fetch_fast.outcome == 'success' && steps.fetch_fast.outputs.slow_count != '0'
         env:
           CATALOG_FETCHER_USER_AGENT: ${{ secrets.CATALOG_FETCHER_USER_AGENT }}
+          FETCH_RELAY_URL: ${{ secrets.FETCH_RELAY_URL }}
+          FETCH_RELAY_KEY: ${{ secrets.FETCH_RELAY_KEY }}
+          FETCH_RELAY_HOSTS: ${{ secrets.FETCH_RELAY_HOSTS }}
           CATALOG_PUSH_ON_FINISH: '1'
           STAGING_PUSH_TOKEN: ${{ secrets.STAGING_PUSH_TOKEN }}
           STAGING_REPO: ${{ secrets.STAGING_REPO }}
