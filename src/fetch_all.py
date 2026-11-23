@@ -14,7 +14,7 @@ import yaml
 
 from . import build_envelope, user_agent_for
 from .google_xml import fetch_google_xml
-from .relay import is_relayed, mount_relay
+from .relay import is_relayed, mount_relay, used_relay
 from .robots import check_store
 from .spacing import Spacer, order_stores
 from .shopify_graphql import SHOPIFY_STOREFRONT_API_VERSION, fetch_shopify_graphql
@@ -281,9 +281,12 @@ def _push_finished_store(key: str) -> bool:
     (out_dir / "_bridge_keys.txt").write_text(",".join(keys), encoding="utf-8")
 
 
-def _write_catalog(out_dir: Path, key: str, feed_format: str, items: list, dry_run: bool) -> None:
-    envelope = build_envelope(retailer_key=key, feed_format=feed_format, items=items)
-    log(f"  ok format={feed_format} items={len(items)}")
+def _write_catalog(
+    out_dir: Path, key: str, feed_format: str, items: list, dry_run: bool, fetched_via: str = ""
+) -> None:
+    envelope = build_envelope(retailer_key=key, feed_format=feed_format, items=items, fetched_via=fetched_via)
+    via = f" via={fetched_via}" if fetched_via else ""
+    log(f"  ok format={feed_format} items={len(items)}{via}")
     if not dry_run:
         path = out_dir / f"{key}.json"
         path.write_text(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
@@ -306,11 +309,12 @@ def _run_one_store(
         log("  via fetch relay (shop blocks GitHub addresses)")
     try:
         feed_format, items = fetch_store(session, store, defaults, cookie_retry=cookie_retry)
-        _write_catalog(out_dir, key, feed_format, items, dry_run)
+        fetched_via = used_relay(str(store.get("base_url") or ""))
+        _write_catalog(out_dir, key, feed_format, items, dry_run, fetched_via)
         return key, "ok", None
     except WooNeedsCookieRetry as exc:
-        if relayed:
-            # The relay already is the fix for this shop; the cookie path would go direct and hit the same block.
+        if relayed or used_relay(str(store.get("base_url") or "")):
+            # The relay already got a 403 too; the cookie path would go direct and hit the same block.
             cause = str(exc.__cause__ or exc)
             return key, "fail", RuntimeError(f"{cause} via fetch relay")
         if cookie_retry:

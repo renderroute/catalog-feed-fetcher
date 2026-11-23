@@ -39,8 +39,9 @@ def build_envelope(
     feed_format: str,
     items: list[dict[str, Any]],
     fetched_at: str | None = None,
+    fetched_via: str = "",
 ) -> dict[str, Any]:
-    return {
+    envelope = {
         "schema_version": SCHEMA_VERSION,
         "retailer_key": retailer_key,
         "feed_format": feed_format,
@@ -48,6 +49,10 @@ def build_envelope(
         "item_count": len(items),
         "items": items,
     }
+    if fetched_via:
+        # "relay" (always-relay shop) or "relay_backup" (403 direct, relay worked)
+        envelope["fetched_via"] = fetched_via
+    return envelope
 
 
 def money(value: Any) -> float | None:
